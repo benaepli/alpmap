@@ -1,0 +1,16 @@
+PROJECT_NAME           = "@PROJECT_NAME@"
+PROJECT_NUMBER         = "@PROJECT_VERSION@"
+OUTPUT_DIRECTORY       = "@DOXYGEN_OUTPUT_DIR@"
+
+INPUT                  =  "@PROJECT_SOURCE_DIR@/docs" \
+                          "@PROJECT_SOURCE_DIR@/include"
+
+RECURSIVE              = YES
+
+# Enable diagram generation if you have Graphviz (dot) installed
+HAVE_DOT               = YES
+
+HTML_EXTRA_STYLESHEET  = @PROJECT_SOURCE_DIR@/docs/doxygen-awesome.css
+HTML_EXTRA_FILES       = @PROJECT_SOURCE_DIR@/docs/doxygen-awesome-darkmode-toggle.js
+
+IMAGE_PATH             = @PROJECT_SOURCE_DIR@/docs/images
