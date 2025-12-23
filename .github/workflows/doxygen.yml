@@ -26,19 +26,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y doxygen graphviz cmake gcc-11 g++-11
-          sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-11 100
-          sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-11 100
-
-      - name: Conan cache
-        uses: actions/cache@v4
-        with:
-          path: conan_cache_save.tgz
-          key: conan-${{ matrix.os }}-${{ hashFiles('conan*.[pl][yo]*') }}
-
-      - name: Conan setup
-        shell: bash
-        run: bash < .github/scripts/conan-ci-setup.sh
+          sudo apt-get install -y doxygen graphviz cmake ninja gcc g++
 
       - name: Configure CMake
         run: |
