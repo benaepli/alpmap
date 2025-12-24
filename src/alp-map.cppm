@@ -64,10 +64,10 @@ namespace alp
         }
     };
 
-    template<typename Key,
-             typename Value,
-             typename Hash = std::hash<Key>,
-             typename Equal = std::equal_to<Key>>
+    export template<typename Key,
+                    typename Value,
+                    typename Hash = std::hash<Key>,
+                    typename Equal = std::equal_to<Key>>
     class Map
         : Set<std::pair<Key const, Value>, MapHashAdapter<Key, Hash>, MapEqualAdapter<Key, Equal>>
     {
