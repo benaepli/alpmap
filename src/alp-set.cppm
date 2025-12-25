@@ -2,6 +2,7 @@ module;
 
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <expected>
 #include <functional>
 
@@ -76,7 +77,7 @@ namespace alp
 
         bool matchEmpty() const { return matchAgainst(static_cast<uint8_t>(Ctrl::Empty)) != 0; }
 
-        bool atEnd() const { return ctrl[0] == static_cast<ctrl_t>(Ctrl::Sentinel); }
+        bool atEnd() const { return matchAgainst(static_cast<uint8_t>(Ctrl::Sentinel) != 0); }
 
         bool nonEmpty() const { return matchAllEmpty() != 0xFFFF; }
 
@@ -110,6 +111,11 @@ namespace alp
         return hash & 0x7F;
     }
 
+    export template<typename T,
+                    typename Hash = std::hash<std::remove_cvref_t<T>>,
+                    typename Equal = std::equal_to<T>>
+    class Set;
+
     export template<typename T>
     struct SetIterator
     {
@@ -126,7 +132,7 @@ namespace alp
             ++ctrl;
             ++slot;
 
-            if (isFull(*ctrl) || atEnd())
+            if (isFull(*ctrl))
             {
                 return *this;
             }
@@ -136,11 +142,6 @@ namespace alp
 
       private:
         static bool isFull(ctrl_t ctrl) { return (ctrl & 0x80) == 0; }
-        bool atEnd() const
-        {
-            // Sentinel is always the 0th byte.
-            return *ctrl == static_cast<uint8_t>(Ctrl::Sentinel);
-        }
 
         SetIterator& skipEmptySlots()
         {
@@ -167,7 +168,7 @@ namespace alp
             int jumpToNext = 16 - offset;
             ctrl += jumpToNext;
             slot += jumpToNext;
-            if (atEnd())
+            if (g.atEnd())
             {
                 return *this;
             }
@@ -189,28 +190,22 @@ namespace alp
                     return *this;
                 }
 
-                if (atEnd())
+                ctrl += 16;
+                slot += 16;
+                if (g.atEnd())
                 {
                     return *this;
                 }
-                ctrl += 16;
-                slot += 16;
             }
         }
 
+        template<typename U, typename Hash, typename Equal>
         friend class Set;
-    };
-
-    struct alignas(16) Block
-    {
-        uint8_t ctrl[16];
     };
 
     constexpr auto MAX_LOAD_FACTOR = 0.875;
 
-    export template<typename T,
-                    typename Hash = std::hash<std::remove_cvref_t<T>>,
-                    typename Equal = std::equal_to<T>>
+    template<typename T, typename Hash, typename Equal>
     class Set
     {
       public:
@@ -231,9 +226,21 @@ namespace alp
         explicit Set(size_type capacity) { reserve(capacity); }
 
         Set(Set const&);
-        Set(Set&&) noexcept;
+        Set(Set&& other) noexcept
+            : size_(0)
+            , used_(0)
+            , capacity_(0)
+            , ctrl_(nullptr)
+        {
+            swap(*this, other);
+        }
+
         Set& operator=(Set const&);
-        Set& operator=(Set&&) noexcept;
+        Set& operator=(Set&& other) noexcept
+        {
+            swap(*this, other);
+            return *this;
+        }
 
         ~Set();
 
@@ -267,8 +274,9 @@ namespace alp
                 return end();
             }
 
-            auto hash = self.hasher(key);
-            auto group = self.h1(hash) % self.numGroups();
+            auto h = hasher {};
+            auto hash = h(key);
+            auto group = self.h1(hash) % self.groups_;
             auto h2 = self.h2(hash);
 
             while (true)
@@ -283,17 +291,28 @@ namespace alp
                 }
                 if (g.matchEmpty())
                     return self.end();
-                group = (group + 1) % self.numGroups();
+                group = (group + 1) % self.groups_;
             }
         }
 
         void clear() noexcept
         {
+            if (ctrl_ != nullptr)
+            {
+                for (size_t i = 0; i < capacity_; ++i)
+                {
+                    // TODO: speed up.
+                    if ((ctrl_[i] & 0x80) == 0)
+                    {
+                        slots_[i].element()->~T();
+                    }
+                }
+                std::free(ctrl_);
+            }
+
             size_ = 0;
             used_ = 0;
             capacity_ = 0;
-
-            blocks_.clear();
             slots_.clear();
             ctrl_ = nullptr;
         }
@@ -313,18 +332,24 @@ namespace alp
                 return;
             }
 
-            // We find the smallest power of n such that 16 * 2^n >= ceil(count / MAX_LOAD_FACTOR).
-            size_t min_cap = static_cast<size_t>(std::ceil(count / MAX_LOAD_FACTOR));
-            min_cap = std::max(min_cap, size_t {16});
-            size_t buckets = std::bit_ceil(min_cap);
-            int n = std::countr_zero(buckets) - 4;
-            rehashImpl(n);
+            rehash(static_cast<size_t>(std::ceil(count / MAX_LOAD_FACTOR)));
         }
 
-        void rehash(size_type count);
+        void rehash(size_type count)
+        {
+            size_t groupCount = findSmallestN(count);
+            return rehashImpl(groupCount);
+        }
 
         template<typename... Args>
-        std::pair<iterator, bool> emplace(Args&&... args);
+        std::pair<iterator, bool> emplace(Args&&... args)
+        {
+            Slot<T> val(std::forward<Args>(args)...);
+ auto h = hasher {};
+            auto hash = h(val);
+            auto h1Val = h1(hash);
+            auto h2Val = h2(hash);
+        }
 
         iterator erase(const_iterator pos);
         size_type erase(T const& key)
@@ -357,11 +382,10 @@ namespace alp
         }
 
         void swap(Set& other) noexcept;
-        friend void swap(Set& lhs, Set& rhs) { lhs.swap(rhs); }
+        friend void swap(Set& lhs, Set& rhs) noexcept { lhs.swap(rhs); }
 
       private:
-        bool isFull() const { return used_ + size_ == capacity_; }
-        size_t numGroups() const { return blocks_.size(); }
+        bool isFull() const { return used_ == capacity_; }
 
         iterator iteratorAt(size_t offset) { return {ctrl_ + offset, slots_.data() + offset}; }
         const_iterator iteratorAt(size_t offset) const
@@ -369,14 +393,98 @@ namespace alp
             return {ctrl_ + offset, slots_.data() + offset};
         }
 
-        void rehashImpl(int newGroupCount) {}
+        // Finds the smallest n such that  16 * n >= ceil(count / MAX_LOAD_FACTOR) + 1
+        // with n being a power of 2.
+        static size_t findSmallestN(size_t count)
+        {
+            size_t min_capacity = count + 1;
+            return std::bit_ceil((min_capacity + 15) >> 4);
+        }
+
+        void rehashImpl(size_t newGroupCount)
+        {
+            auto count = 16 * newGroupCount;
+            auto newCapacity = count - 1;
+            auto* newCtrl = allocate(count);
+
+            std::vector<Slot<T>> newSlots(newCapacity);
+            std::memset(newCtrl, static_cast<ctrl_t>(Ctrl::Empty), newCapacity);
+            newCtrl[newCapacity] = static_cast<ctrl_t>(Ctrl::Sentinel);
+
+            auto insertNew = [&](Slot<T> const& value)
+            {
+                auto hash = hasher {}(*value.element());
+                auto h1Val = h1(hash);
+                auto h2Val = h2(hash);
+
+                size_t mask = newGroupCount - 1;
+                size_t group = h1Val & mask;
+
+                while (true)
+                {
+                    Group g {newCtrl + group * 16};
+                    // ~matchFull gives us Empty + Sentinel candidates.
+                    uint32_t candidates = ~g.matchFull() & 0xFFFF;
+
+                    while (candidates != 0)
+                    {
+                        int offset = std::countr_zero(candidates);
+                        size_t idx = group * 16 + offset;
+
+                        if (idx == newCapacity)
+                        {
+                            candidates &= ~(1U << offset);
+                            continue;
+                        }
+
+                        // TODO: handle non trivially-relocatable types.
+                        newSlots[idx] = value;
+                        newCtrl[idx] = h2Val;
+                        return;
+                    }
+
+                    group = (group + 1) & mask;
+                }
+            };
+
+            if (capacity_ > 0)
+            {
+                ctrl_t* current = ctrl_;
+                while (true)
+                {
+                    Group g(current);
+                    for (auto i : BitMaskIterable(g.matchFull()))
+                    {
+                        auto& old = slots_[current - ctrl_ + i];
+                        insertNew(old);
+                    }
+                    if (g.atEnd())
+                    {
+                        break;
+                    }
+                    current += 16;
+                }
+                std::free(ctrl_);
+            }
+
+            ctrl_ = newCtrl;
+            slots_ = std::move(newSlots);
+            capacity_ = newCapacity;
+            groups_ = newGroupCount;
+        }
+
+        static ctrl_t* allocate(size_t count)
+        {
+            constexpr size_t alignment = 16;
+            return static_cast<ctrl_t*>(std::aligned_alloc(alignment, sizeof(ctrl_t) * count));
+        }
 
         size_t size_;
         size_t used_;
         size_t capacity_;
+        size_t groups_;
 
-        std::vector<Block> blocks_;
         std::vector<Slot<T>> slots_;
-        ctrl_t const* ctrl_;
+        ctrl_t* ctrl_;
     };
 }  // namespace alp
