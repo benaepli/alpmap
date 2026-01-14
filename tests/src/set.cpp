@@ -223,7 +223,7 @@ TEST(SetGroup, ExactlyOneGroup)
     std::vector<int> found;
     for (auto it = s.begin(); it != s.end(); ++it)
     {
-        found.push_back(*it->element());
+        found.push_back(*it);
     }
     EXPECT_EQ(found.size(), 16);
 }
@@ -245,7 +245,7 @@ TEST(SetGroup, GroupBoundaryCross)
     std::vector<int> found;
     for (auto it = s.begin(); it != s.end(); ++it)
     {
-        found.push_back(*it->element());
+        found.push_back(*it);
     }
     EXPECT_EQ(found.size(), 17);
 }
@@ -362,7 +362,7 @@ TEST(SetIterator, SparseIteration)
     std::vector<int> found;
     for (auto it = s.begin(); it != s.end(); ++it)
     {
-        found.push_back(*it->element());
+        found.push_back(*it);
     }
     // Should have exactly 10 odd elements
     EXPECT_EQ(found.size(), 10);
@@ -484,7 +484,7 @@ TEST(SetTypes, MoveOnlyType)
     std::vector<int> values;
     for (auto& slot : s)
     {
-        values.push_back(**slot.element());
+        values.push_back(*slot);
     }
     std::sort(values.begin(), values.end());
     EXPECT_EQ(values.size(), 2);
@@ -642,7 +642,7 @@ TEST(SetEdge, SingleElement)
     EXPECT_TRUE(s.contains(42));
     auto it = s.begin();
     EXPECT_NE(it, s.end());
-    EXPECT_EQ(*it->element(), 42);
+    EXPECT_EQ(*it, 42);
     ++it;
     EXPECT_EQ(it, s.end());
 }

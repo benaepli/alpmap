@@ -6,6 +6,9 @@ module;
 #include <expected>
 #include <functional>
 #include <memory>
+#include <tuple>
+#include <utility>
+#include <vector>
 
 #include <emmintrin.h>
 
@@ -29,6 +32,8 @@ namespace alp
         Sentinel = 0b11111111,
     };
 
+    /// A slot stores an element of type T using aligned raw storage.
+    /// This allows us to manually control construction and destruction.
     template<typename T>
     struct Slot
     {
@@ -38,6 +43,8 @@ namespace alp
         T const* element() const { return reinterpret_cast<T const*>(storage); }
     };
 
+    /// A helper class for iterating over the set bits in a 16-bit mask.
+    /// Used to iterate over matching slots in a SIMD group.
     class BitMaskIterable
     {
       public:
@@ -70,6 +77,8 @@ namespace alp
         uint32_t mask_;
     };
 
+    /// A group of 16 control bytes, the fundamental unit of Swiss Table probing.
+    /// Uses SSE/SIMD instructions for fast parallel matching.
     struct Group
     {
         ctrl_t const* ctrl;
@@ -112,7 +121,8 @@ namespace alp
         }
     };
 
-    // A policy that mixes bits to protect against poor std::hash implementations
+    /// A hash policy that mixes bits to protect against poor std::hash implementations.
+    /// Uses MurmurHash3's 64-bit finalizer for high-quality bit distribution.
     struct MixHashPolicy
     {
         static constexpr size_t apply(size_t h)
@@ -127,26 +137,28 @@ namespace alp
         }
     };
 
-    // A policy for when the user provides a high-quality hash and wants to skip mixing
+    /// A hash policy for when the user provides a high-quality hash.
+    /// Skips the mixing step for maximum performance.
     export struct IdentityHashPolicy
     {
         static constexpr size_t apply(size_t h) { return h; }
     };
 
-    export template<typename T,
-                    typename Hash = std::hash<std::remove_cvref_t<T>>,
-                    typename Equal = std::equal_to<T>,
-                    typename Policy = MixHashPolicy>
-        requires std::move_constructible<T>
-    class Set;
+    /// Forward declaration of the Table base class.
+    export template<typename T, typename Hash, typename Equal, typename Policy>
+    class Table;
 
+    /// Iterator for traversing elements in a Swiss Table.
+    /// Uses the control byte array to efficiently skip empty/deleted slots.
     export template<typename T>
     struct SetIterator
     {
         template<typename U>
         friend struct SetIterator;
 
+        /// Pointer to the current control byte.
         ctrl_t const* ctrl;
+        /// Pointer to the current slot.
         Slot<T>* slot;
 
         SetIterator(ctrl_t const* c, Slot<T>* s)
@@ -173,8 +185,8 @@ namespace alp
             return lhs.ctrl == rhs.ctrl;
         }
 
-        Slot<T>& operator*() const { return *slot; }
-        Slot<T>* operator->() const { return slot; }
+        T& operator*() const { return *slot->element(); }
+        T* operator->() const { return slot->element(); }
 
         SetIterator& operator++()
         {
@@ -265,34 +277,31 @@ namespace alp
         }
 
         template<typename U, typename Hash, typename Equal, typename Policy>
-            requires std::move_constructible<U>
-        friend class Set;
+        friend class Table;
     };
 
+    /// Maximum load factor before rehashing is triggered.
+    /// 7/8 = 0.875 provides a good balance between memory usage and probe length.
     constexpr auto MAX_LOAD_FACTOR = 0.875;
 
+    /// Base class for Swiss Table hash containers.
+    /// Implements the core Swiss Table algorithm with SIMD-accelerated probing.
+    /// Uses open addressing with linear probing and a control byte array.
     template<typename T, typename Hash, typename Equal, typename Policy>
-        requires std::move_constructible<T>
-    class Set
+    class Table
     {
-      public:
+      protected:
         using value_type = T;
         using size_type = std::size_t;
         using difference_type = std::ptrdiff_t;
-        using hasher = Hash;
-        using key_equal = Equal;
-        using reference = value_type&;
-        using const_reference = value_type const&;
-        using pointer = value_type*;
-        using const_pointer = value_type const*;
-
         using iterator = SetIterator<T>;
         using const_iterator = SetIterator<T const>;
 
-        Set() = default;
-        explicit Set(size_type capacity) { reserve(capacity); }
+        Table() = default;
 
-        Set(Set const& other)
+        explicit Table(size_type capacity) { reserve(capacity); }
+
+        Table(Table const& other)
             requires std::copy_constructible<T>
             : size_(other.size_)
             , used_(other.used_)
@@ -316,7 +325,7 @@ namespace alp
                     for (auto it = other.begin(); it != other.end(); ++it)
                     {
                         size_t offset = it.ctrl - other.ctrl_;
-                        std::construct_at(slots_[offset].element(), *it->element());
+                        std::construct_at(slots_[offset].element(), *it);
 
                         ctrl_[offset] = other.ctrl_[offset];
                     }
@@ -338,34 +347,35 @@ namespace alp
             }
         }
 
-        Set(Set&& other) noexcept { this->swap(other); }
+        Table(Table&& other) noexcept { this->swap(other); }
 
-        Set& operator=(Set const& other)
+        Table& operator=(Table const& other)
             requires std::copy_constructible<T>
         {
             {
                 if (this != &other)
                 {
-                    Set temp(other);
+                    Table temp(other);
                     swap(temp);
                 }
                 return *this;
             }
         }
-        Set& operator=(Set&& other) noexcept
+
+        Table& operator=(Table&& other) noexcept
         {
             this->swap(other);
             return *this;
         }
 
-        ~Set() { clear(); }
+        ~Table() { clear(); }
 
+      public:
         iterator begin()
         {
             auto it = iteratorAt(0);
             if (it != end())
             {
-                // We need to perform this check since skipNextSlots reads from the control block.
                 it.skipEmptySlots();
             }
             return it;
@@ -387,46 +397,12 @@ namespace alp
         [[nodiscard]] bool empty() const { return size_ == 0; }
         [[nodiscard]] size_t size() const { return size_; }
 
-        template<typename Self, typename K>
-            requires std::is_same_v<std::remove_cvref_t<K>, T>
-            || requires { typename Hash::is_transparent; }
-        [[nodiscard]] auto find(this Self&& self, K const& key)
-        {
-            if (self.size_ == 0)
-            {
-                return self.end();
-            }
-
-            auto h = hasher {};
-            auto hash = h(key);
-            auto group = self.h1(hash) & (self.groups_ - 1);  // Since self.groups_ is a power of 2
-            auto h2 = self.h2(hash);
-
-            while (true)
-            {
-                Group g {self.ctrl_ + group * 16};
-                for (int i : g.match(h2))
-                {
-                    if (Equal {}(key, *self.slots_[group * 16 + i].element()))
-                    {
-                        return self.iteratorAt(group * 16 + i);
-                    }
-                }
-                if (g.anyEmpty())
-                {
-                    return self.end();
-                }
-                group = (group + 1) % self.groups_;
-            }
-        }
-
         void clear() noexcept
         {
             if (ctrl_ != nullptr)
             {
                 for (size_t i = 0; i < capacity_; ++i)
                 {
-                    // TODO: speed up.
                     if ((ctrl_[i] & 0x80) == 0)
                     {
                         slots_[i].element()->~T();
@@ -443,12 +419,99 @@ namespace alp
             ctrl_ = nullptr;
         }
 
-        template<typename K>
-            requires std::is_same_v<std::remove_cvref_t<K>, T>
-            || requires { typename Hash::is_transparent; }
-        bool contains(K const& key) const
+        void swap(Table& other) noexcept
         {
-            return find(key) != end();
+            using std::swap;
+            swap(size_, other.size_);
+            swap(used_, other.used_);
+            swap(capacity_, other.capacity_);
+            swap(ctrlLen_, other.ctrlLen_);
+            swap(groups_, other.groups_);
+            swap(slots_, other.slots_);
+            swap(ctrl_, other.ctrl_);
+        }
+
+      protected:
+        /// Finds the index of the slot containing the given key.
+        /// Returns ctrlLen_ if not found.
+        template<typename K>
+        [[nodiscard]] auto find_internal(K const& key) const -> size_t
+        {
+            if (size_ == 0)
+            {
+                return ctrlLen_;
+            }
+
+            auto h = Hash {};
+            auto hash = h(key);
+            auto group = h1(hash) & (groups_ - 1);  // Since groups_ is a power of 2
+            auto h2Val = h2(hash);
+
+            while (true)
+            {
+                Group g {ctrl_ + group * 16};
+                for (int i : g.match(h2Val))
+                {
+                    if (Equal {}(key, *slots_[group * 16 + i].element()))
+                    {
+                        return group * 16 + i;
+                    }
+                }
+                if (g.anyEmpty())
+                {
+                    return ctrlLen_;
+                }
+                group = (group + 1) & (groups_ - 1);
+            }
+        }
+
+        /// Core insertion logic. Constructs the element, checks for duplicates,
+        /// triggers rehash if needed, and inserts into an empty slot.
+        /// Returns the index and whether insertion occurred.
+        template<typename... Args>
+        std::pair<size_t, bool> emplace_internal(Args&&... args)
+        {
+            alignas(T) uint8_t tempStorage[sizeof(T)];
+            T* temp =
+                std::construct_at(reinterpret_cast<T*>(tempStorage), std::forward<Args>(args)...);
+
+            auto h = Hash {};
+            auto hash = h(*temp);
+            auto h1Val = h1(hash);
+            auto h2Val = h2(hash);
+
+            size_t idx = find_internal(*temp);
+            if (idx != ctrlLen_)
+            {
+                temp->~T();
+                return {idx, false};
+            }
+
+            if (capacity_ == 0 || size_ + 1 > capacity_ * MAX_LOAD_FACTOR)
+            {
+                reserve(size_ + 1);
+            }
+
+            // Re-find position after potential rehash
+            size_t mask = groups_ - 1;
+            size_t group = h1Val & mask;
+            while (true)
+            {
+                auto baseSlot = group * 16;
+                Group g {ctrl_ + baseSlot};
+                auto empty = g.matchEmpty();
+                if (empty != 0)
+                {
+                    int offset = std::countr_zero(empty);
+                    size_t final_idx = baseSlot + offset;
+                    ctrl_[final_idx] = h2Val;
+                    std::construct_at(slots_[final_idx].element(), std::move(*temp));
+                    temp->~T();
+                    size_++;
+                    return {final_idx, true};
+                }
+                group = (group + 1) & mask;
+            }
         }
 
         void reserve(size_type count)
@@ -469,33 +532,17 @@ namespace alp
             return rehashImpl(groupCount);
         }
 
-        template<typename... Args>
-        std::pair<iterator, bool> emplace(Args&&... args)
+        /// Erases the element at the given slot index.
+        /// Marks the slot as deleted or empty based on group state.
+        void erase_slot(size_t offset)
         {
-            alignas(T) uint8_t tempStorage[sizeof(T)];
-            T* temp =
-                std::construct_at(reinterpret_cast<T*>(tempStorage), std::forward<Args>(args)...);
-
-            auto h = hasher {};
-            auto hash = h(*temp);
-            auto h1Val = h1(hash);
-            auto h2Val = h2(hash);
-
-            auto result = emplace_internal(*temp, h1Val, h2Val);
-
-            temp->~T();
-
-            return result;
-        }
-
-        void erase(const_iterator pos)
-        {
-            pos.slot->element()->~T();
+            slots_[offset].element()->~T();
             --size_;
 
-            // Calculate offset to modify via Set's ctrl_ array
-            size_t offset = pos.ctrl - ctrl_;
-            auto groupPtr = pos.alignedGroup();
+            auto addr = reinterpret_cast<uintptr_t>(ctrl_ + offset);
+            auto alignedAddr = addr & ~static_cast<uintptr_t>(15);
+            auto groupPtr = reinterpret_cast<ctrl_t*>(alignedAddr);
+
             Group g {groupPtr};
             if (g.anyEmpty())
             {
@@ -507,122 +554,27 @@ namespace alp
             }
         }
 
-        size_type erase(T const& key)
-        {
-            auto it = find(key);
-            if (it == end())
-            {
-                return 0;
-            }
-            erase(it);
-            return 1;
-        }
-
-        [[nodiscard]]
-        std::expected<std::reference_wrapper<T>, Error> get(T const& key)
-        {
-            if (auto it = find(key); it != end())
-                return std::ref(*it->element());
-            return std::unexpected(Error::NotFound);
-        }
-
-        std::expected<void, Error> tryErase(T const& key)
-        {
-            if (auto it = find(key); it != end())
-            {
-                erase(it);
-                return {};
-            }
-            return std::unexpected(Error::NotFound);
-        }
-
-        void swap(Set& other) noexcept
-        {
-            using std::swap;
-            swap(size_, other.size_);
-            swap(used_, other.used_);
-            swap(capacity_, other.capacity_);
-            swap(ctrlLen_, other.ctrlLen_);
-            swap(groups_, other.groups_);
-            swap(slots_, other.slots_);
-            swap(ctrl_, other.ctrl_);
-        }
-        friend void swap(Set& lhs, Set& rhs) noexcept { lhs.swap(rhs); }
-
-      private:
-        std::pair<iterator, bool> emplace_internal(T& value, size_t h1Val, ctrl_t h2Val)
-        {
-            if (capacity_ == 0)
-            {
-                reserve(1);
-            }
-            size_t mask = groups_ - 1;
-            size_t group = h1Val & mask;
-
-            while (true)
-            {
-                auto baseSlot = group * 16;
-                Group g {ctrl_ + baseSlot};
-
-                BitMaskIterable candidates = g.match(h2Val);
-                for (auto i : candidates)
-                {
-                    auto slotNumber = baseSlot + i;
-                    T const& result = *slots_[slotNumber].element();
-
-                    if (Equal {}(result, value))
-                    {
-                        return {iteratorAt(slotNumber), false};
-                    }
-                }
-
-                auto empty = g.matchEmpty();
-                if (empty != 0)
-                {
-                    if (size_ + 1 > capacity_ * MAX_LOAD_FACTOR)
-                    {
-                        reserve(size_ + 1);
-                        return emplace_internal(value, h1Val, h2Val);
-                    }
-
-                    int offset = std::countr_zero(empty);
-                    size_t idx = baseSlot + offset;
-
-                    ctrl_[idx] = h2Val;
-                    std::construct_at(slots_[idx].element(), std::move(value));
-                    size_++;
-
-                    return {iteratorAt(idx), true};
-                }
-
-                group = (group + 1) & mask;
-            }
-        }
-
-        // Incorporate the policy mix directly into these helpers
-        static constexpr size_t h1(size_t hash)
-        {
-            // Apply policy, then shift for group index
-            return Policy::apply(hash) >> 7;
-        }
-
-        static constexpr ctrl_t h2(size_t hash)
-        {
-            // Apply policy, then mask for control byte
-            // Even if 'hash' is aligned (e.g. 128), the mix ensures entropy here.
-            return Policy::apply(hash) & 0x7F;
-        }
-
-        bool isFull() const { return used_ == capacity_; }
+        /// Extracts the upper bits for group selection.
+        static constexpr size_t h1(size_t hash) { return Policy::apply(hash) >> 7; }
+        /// Extracts the lower 7 bits for control byte matching.
+        static constexpr ctrl_t h2(size_t hash) { return Policy::apply(hash) & 0x7F; }
 
         iterator iteratorAt(size_t offset) { return {ctrl_ + offset, slots_.data() + offset}; }
         const_iterator iteratorAt(size_t offset) const
         {
-            // Construct a non-const iterator, then convert via converting constructor
             return iterator {(ctrl_ + offset), const_cast<Slot<T>*>(slots_.data() + offset)};
         }
 
-        /// Finds the smallest n such that  16 * n >= count + 1
+        size_t size_ = 0;
+        size_t used_ = 0;
+        size_t capacity_ = 0;
+        size_t ctrlLen_ = 0;
+        size_t groups_ = 0;
+        std::vector<Slot<T>> slots_;
+        ctrl_t* ctrl_ = nullptr;
+
+      private:
+        /// Finds the smallest n such that 16 * n >= count + 1
         /// with n being a power of 2.
         static size_t findSmallestN(size_t count)
         {
@@ -642,13 +594,13 @@ namespace alp
 
             auto insertNew = [&](Slot<T>& value)
             {
-                auto hash = hasher {}(*value.element());
+                auto hash = Hash {}(*value.element());
                 auto h1Val = h1(hash);
                 auto h2Val = h2(hash);
 
                 size_t mask = newGroupCount - 1;
-                // We calculate the original desired group. Equivalent to self.h1(hash) %
-                // self.groups_ by power of 2.
+                // Calculate the desired group. Equivalent to h1Val % newGroupCount
+                // since newGroupCount is a power of 2.
                 size_t group = h1Val & mask;
 
                 while (true)
@@ -688,13 +640,13 @@ namespace alp
                     current += 16;
                 }
 
-                // Destroy moved-from elements before freeing memory
                 current = ctrl_;
                 while (true)
                 {
                     Group g(current);
                     for (auto i : BitMaskIterable(g.matchFull()))
                     {
+                        // Destroy moved-from elements before freeing memory
                         auto& old = slots_[current - ctrl_ + i];
                         old.element()->~T();
                     }
@@ -720,14 +672,126 @@ namespace alp
             constexpr size_t alignment = 16;
             return static_cast<ctrl_t*>(std::aligned_alloc(alignment, sizeof(ctrl_t) * count));
         }
+    };
 
-        size_t size_ = 0;
-        size_t used_ = 0;
-        size_t capacity_ = 0;
-        size_t ctrlLen_ = 0;
-        size_t groups_ = 0;
+    /// A hash set based on Swiss Tables.
+    /// Uses SIMD-accelerated probing for efficient lookup, insertion, and deletion.
+    /// Elements are stored immutably; iterator always provides const access.
+    export template<typename T,
+                    typename Hash = std::hash<std::remove_cvref_t<T>>,
+                    typename Equal = std::equal_to<T>,
+                    typename Policy = MixHashPolicy>
+        requires std::move_constructible<T>
+    class Set : private Table<T, Hash, Equal, Policy>
+    {
+        using Base = Table<T, Hash, Equal, Policy>;
 
-        std::vector<Slot<T>> slots_;
-        ctrl_t* ctrl_ = nullptr;
+      public:
+        using value_type = T;
+        using size_type = typename Base::size_type;
+        using difference_type = typename Base::difference_type;
+        using hasher = Hash;
+        using key_equal = Equal;
+        using reference = value_type&;
+        using const_reference = value_type const&;
+        using pointer = value_type*;
+        using const_pointer = value_type const*;
+
+        using iterator = SetIterator<T const>;
+        using const_iterator = SetIterator<T const>;
+
+        using Base::Base;
+        using Base::clear;
+        using Base::empty;
+        using Base::reserve;
+        using Base::size;
+        using Base::swap;
+
+        Set() = default;
+        explicit Set(size_type capacity)
+            : Base(capacity)
+        {
+        }
+
+        iterator begin() { return Base::begin(); }
+        iterator end() { return Base::end(); }
+        const_iterator begin() const { return Base::begin(); }
+        const_iterator end() const { return Base::end(); }
+        const_iterator cbegin() const { return Base::cbegin(); }
+        const_iterator cend() const { return Base::cend(); }
+
+        template<typename K>
+            requires std::is_same_v<std::remove_cvref_t<K>, T>
+            || requires { typename Hash::is_transparent; }
+        [[nodiscard]] iterator find(K const& key)
+        {
+            size_t idx = Base::find_internal(key);
+            if (idx == this->ctrlLen_)
+                return end();
+            return Base::iteratorAt(idx);
+        }
+
+        template<typename K>
+            requires std::is_same_v<std::remove_cvref_t<K>, T>
+            || requires { typename Hash::is_transparent; }
+        [[nodiscard]] const_iterator find(K const& key) const
+        {
+            size_t idx = Base::find_internal(key);
+            if (idx == this->ctrlLen_)
+                return end();
+            return Base::iteratorAt(idx);
+        }
+
+        template<typename K>
+            requires std::is_same_v<std::remove_cvref_t<K>, T>
+            || requires { typename Hash::is_transparent; }
+        bool contains(K const& key) const
+        {
+            return find(key) != end();
+        }
+
+        template<typename... Args>
+        std::pair<iterator, bool> emplace(Args&&... args)
+        {
+            auto [idx, success] = Base::emplace_internal(std::forward<Args>(args)...);
+            return {Base::iteratorAt(idx), success};
+        }
+
+        void erase(const_iterator pos)
+        {
+            size_t offset = pos.ctrl - this->ctrl_;
+            Base::erase_slot(offset);
+        }
+
+        size_type erase(T const& key)
+        {
+            size_t idx = Base::find_internal(key);
+            if (idx == this->ctrlLen_)
+                return 0;
+            Base::erase_slot(idx);
+            return 1;
+        }
+
+        [[nodiscard]]
+        std::expected<std::reference_wrapper<T const>, Error> get(T const& key)
+        {
+            auto it = find(key);
+            if (it != end())
+                return std::ref(*it);
+            return std::unexpected(Error::NotFound);
+        }
+
+        std::expected<void, Error> tryErase(T const& key)
+        {
+            auto it = find(key);
+            if (it != end())
+            {
+                erase(it);
+                return {};
+            }
+            return std::unexpected(Error::NotFound);
+        }
+
+        friend void swap(Set& lhs, Set& rhs) noexcept { lhs.swap(rhs); }
     };
 }  // namespace alp

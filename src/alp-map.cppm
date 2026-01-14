@@ -3,6 +3,7 @@ module;
 #include <expected>
 #include <functional>
 #include <tuple>
+#include <utility>
 
 export module alp:map;
 
@@ -64,23 +65,31 @@ namespace alp
         }
     };
 
+    /// A hash map (unordered_map) based on Swiss Tables.
+    /// Uses SIMD-accelerated probing for efficient lookup, insertion, and deletion.
     export template<typename Key,
                     typename Value,
                     typename Hash = std::hash<Key>,
-                    typename Equal = std::equal_to<Key>>
+                    typename Equal = std::equal_to<Key>,
+                    typename Policy = MixHashPolicy>
+        requires std::move_constructible<std::pair<Key const, Value>>
     class Map
-        : Set<std::pair<Key const, Value>, MapHashAdapter<Key, Hash>, MapEqualAdapter<Key, Equal>>
+        : private Table<std::pair<Key const, Value>,
+                        MapHashAdapter<Key, Hash>,
+                        MapEqualAdapter<Key, Equal>,
+                        Policy>
     {
         using PairType = std::pair<Key const, Value>;
-        using Base = Set<PairType, MapHashAdapter<Key, Hash>, MapEqualAdapter<Key, Equal>>;
+        using Base =
+            Table<PairType, MapHashAdapter<Key, Hash>, MapEqualAdapter<Key, Equal>, Policy>;
 
       public:
         using key_type = Key;
         using mapped_type = Value;
         using value_type = PairType;
-        using size_type = Base::size_type;
-        using iterator = Base::iterator;
-        using const_iterator = Base::const_iterator;
+        using size_type = typename Base::size_type;
+        using iterator = typename Base::iterator;
+        using const_iterator = typename Base::const_iterator;
 
         using Base::Base;
 
@@ -94,23 +103,40 @@ namespace alp
         using Base::size;
         using Base::swap;
 
-        iterator find(Key const& key) { return Base::find(key); }
-        const_iterator find(Key const& key) const { return Base::find(key); }
+        Map() = default;
+        explicit Map(size_type capacity)
+            : Base(capacity)
+        {
+        }
 
-        bool contains(Key const& key) const { return Base::contains(key); }
+        iterator find(Key const& key)
+        {
+            size_t idx = Base::find_internal(key);
+            if (idx == this->ctrlLen_)
+                return this->end();
+            return Base::iteratorAt(idx);
+        }
+
+        const_iterator find(Key const& key) const
+        {
+            size_t idx = Base::find_internal(key);
+            if (idx == this->ctrlLen_)
+                return this->end();
+            return Base::iteratorAt(idx);
+        }
+
+        bool contains(Key const& key) const { return find(key) != this->end(); }
 
         template<typename... Args>
         std::pair<iterator, bool> emplace(Args&&... args)
         {
-            return Base::emplace(std::forward<Args>(args)...);
+            auto [idx, success] = Base::emplace_internal(std::forward<Args>(args)...);
+            return {Base::iteratorAt(idx), success};
         }
 
-        std::pair<iterator, bool> insert(value_type const& value) { return Base::emplace(value); }
+        std::pair<iterator, bool> insert(value_type const& value) { return emplace(value); }
 
-        std::pair<iterator, bool> insert(value_type&& value)
-        {
-            return Base::emplace(std::move(value));
-        }
+        std::pair<iterator, bool> insert(value_type&& value) { return emplace(std::move(value)); }
 
         template<typename M>
         std::pair<iterator, bool> insert_or_assign(Key const& k, M&& obj)
@@ -132,7 +158,7 @@ namespace alp
             if (it != end())
                 return it->second;
 
-            auto [new_it, success] = Base::emplace(
+            auto [new_it, success] = emplace(
                 std::piecewise_construct, std::forward_as_tuple(key), std::forward_as_tuple());
             return new_it->second;
         }
@@ -148,17 +174,19 @@ namespace alp
             return std::unexpected(Error::NotFound);
         }
 
-        using Base::erase;
+        void erase(const_iterator pos)
+        {
+            size_t offset = pos.ctrl - Base::ctrl_;
+            Base::erase_slot(offset);
+        }
 
         size_type erase(Key const& key)
         {
-            auto it = find(key);
-            if (it != end())
-            {
-                Base::erase(it);
-                return 1;
-            }
-            return 0;
+            size_t idx = Base::find_internal(key);
+            if (idx == Base::ctrlLen_)
+                return 0;
+            Base::erase_slot(idx);
+            return 1;
         }
 
         std::expected<void, Error> tryErase(Key const& key)
@@ -166,10 +194,12 @@ namespace alp
             auto it = find(key);
             if (it != end())
             {
-                Base::erase(it);
+                erase(it);
                 return {};
             }
             return std::unexpected(Error::NotFound);
         }
+
+        friend void swap(Map& lhs, Map& rhs) noexcept { lhs.swap(rhs); }
     };
 }  // namespace alp
