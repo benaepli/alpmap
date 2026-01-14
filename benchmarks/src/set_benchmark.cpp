@@ -342,8 +342,6 @@ namespace
     }
     BENCHMARK(bmStdSetCopy)->Range(8, 1 << 17);
 
-    // ============================================================================
-
     /// Template benchmark for insert with configurable hash policy
     template<typename Policy>
     void bmSetInsertRandomPolicy(benchmark::State& state)

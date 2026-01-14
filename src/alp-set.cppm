@@ -1,5 +1,6 @@
 module;
 
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -10,15 +11,15 @@ module;
 #include <utility>
 #include <vector>
 
-#include <eve/wide.hpp>
-
-#include "eve/module/core/regular/first_true.hpp"
+#include "eve/eve.hpp"
 
 export module alp:set;
 
 namespace alp
 {
-    using ctrl_simd = eve::wide<uint8_t>;
+    constexpr auto native_size = eve::expected_cardinal_v<std::uint8_t>;
+    constexpr auto capped_size = std::min(native_size, static_cast<std::ptrdiff_t>(64));
+    using ctrl_simd = eve::wide<uint8_t, eve::fixed<capped_size>>;
     constexpr size_t LANE_COUNT = ctrl_simd::size();
     using ctrl_mask = eve::logical<ctrl_simd>;
 
@@ -49,47 +50,39 @@ namespace alp
         T const* element() const { return reinterpret_cast<T const*>(storage); }
     };
 
+    /// Iterable over set bits in a SIMD mask.
     struct MatchIterable
     {
-        ctrl_mask mask;
+        using bits_t = std::uint64_t;
+        bits_t bits;
+
+        /// Constructs by extracting mask bits to scalar integer immediately.
+        explicit MatchIterable(ctrl_mask mask)
+            : bits(eve::top_bits {mask}.as_int())
+        {
+        }
 
         struct Iterator
         {
-            ctrl_mask mask;
-            size_t idx;
+            bits_t bits;
 
-            int operator*() const { return static_cast<int>(idx); }
+            /// Returns the index of the current lowest set bit.
+            int operator*() const { return std::countr_zero(bits); }
 
             Iterator& operator++()
             {
-                // Clear the current bit using if_else: set idx position to false
-                auto clearMask = ctrl_mask {false};
-                clearMask.set(idx, true);
-                mask = eve::if_else(clearMask, eve::false_(eve::as(mask)), mask);
-
-                auto nextIdx = eve::first_true(mask);
-                if (nextIdx)
-                {
-                    idx = static_cast<size_t>(*nextIdx);
-                }
-                else
-                {
-                    idx = LANE_COUNT;
-                }
+                // Clear the lowest set bit efficiently: bits &= (bits - 1)
+                bits &= (bits - 1);
                 return *this;
             }
 
-            bool operator!=(Iterator const& other) const { return idx != other.idx; }
+            bool operator!=(Iterator const& other) const { return bits != other.bits; }
         };
 
-        Iterator begin() const
-        {
-            auto firstIdx = eve::first_true(mask);
-            return {mask, firstIdx ? static_cast<size_t>(*firstIdx) : LANE_COUNT};
-        }
-        Iterator end() const { return {mask, LANE_COUNT}; }
+        Iterator begin() const { return {bits}; }
+        Iterator end() const { return {0}; }  // End state is when all bits are zero
 
-        explicit operator bool() const { return eve::any(mask); }
+        explicit operator bool() const { return bits != 0; }
     };
 
     /// A group of control bytes, the fundamental unit of Swiss Table probing.
@@ -99,7 +92,6 @@ namespace alp
         ctrl_simd data;
 
         /// Constructs a Group by loading control bytes from memory.
-        /// EVE's wide constructor handles aligned loads with VMOVDQA.
         explicit Group(ctrl_t const* ctrl)
             : data(ctrl)
         {
@@ -241,18 +233,13 @@ namespace alp
             auto const offset = groupOffset();
             Group g {groupPtr};
             auto mask = g.matchFull();
-            // Clear bits before offset using if_else with a mask
-            ctrl_mask clearMask {false};
-            for (int i = 0; i < offset; ++i)
-            {
-                clearMask.set(i, true);
-            }
-            mask = eve::if_else(clearMask, eve::false_(eve::as(mask)), mask);
 
-            auto firstIdx = eve::first_true(mask);
-            if (firstIdx)
+            auto bits = eve::top_bits {mask}.as_int();
+            bits = (bits >> offset) << offset;
+
+            if (bits != 0)
             {
-                int idx = static_cast<int>(*firstIdx);
+                int idx = std::countr_zero(bits);
                 int jump = idx - offset;
                 ctrl += jump;
                 slot += jump;
@@ -276,10 +263,11 @@ namespace alp
                 Group g {ctrl};
                 auto mask = g.matchFull();
 
-                auto firstIdx = eve::first_true(mask);
-                if (firstIdx)
+                // Use scalar bit manipulation instead of SIMD first_true
+                auto bits = eve::top_bits {mask}.as_int();
+                if (bits != 0)
                 {
-                    int nextIndex = static_cast<int>(*firstIdx);
+                    int nextIndex = std::countr_zero(bits);
                     ctrl += nextIndex;
                     slot += nextIndex;
                     return *this;
