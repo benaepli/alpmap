@@ -13,16 +13,22 @@ option(BUILD_BENCHMARKS "Build benchmark programs" OFF)
 option(BUILD_DOCS "Build Doxygen documentation" ON)
 
 
-set(TOMLPLUSPLUS_BUILD_MODULES ON)
 include(FetchContent)
+
 FetchContent_Declare(
-        tomlplusplus
-        GIT_REPOSITORY https://github.com/marzer/tomlplusplus.git
-        GIT_TAG v3.4.0
+        eve
+        URL https://github.com/jfalcou/eve/archive/refs/tags/v2023.02.15.zip
 )
-FetchContent_MakeAvailable(tomlplusplus)
+
+set(EVE_BUILD_DOCUMENTATION OFF)
+set(EVE_BUILD_BENCHMARKS OFF)
+set(EVE_BUILD_TEST OFF)
+set(EVE_BUILD_EXAMPLES OFF)
+FetchContent_MakeAvailable(eve)
 
 add_library(alpmap)
+
+target_link_libraries(alpmap PRIVATE eve::eve)
 
 target_sources(alpmap
         PUBLIC
@@ -30,14 +36,6 @@ target_sources(alpmap
         src/alp.cppm
         src/alp-map.cppm
         src/alp-set.cppm
-)
-
-target_link_libraries(alpmap
-        PUBLIC
-        #        asio::asio
-        #        argparse::argparse
-        #        spdlog::spdlog
-        tomlplusplus::tomlplusplus
 )
 
 target_compile_features(alpmap PUBLIC cxx_std_23)

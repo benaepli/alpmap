@@ -10,17 +10,17 @@ module;
 #include <utility>
 #include <vector>
 
-#include <experimental/simd>
+#include <eve/wide.hpp>
+
+#include "eve/module/core/regular/first_true.hpp"
 
 export module alp:set;
 
 namespace alp
 {
-    namespace simd = std::experimental;
-
-    using ctrl_simd = simd::fixed_size_simd<uint8_t, 32>;
+    using ctrl_simd = eve::wide<uint8_t>;
     constexpr size_t LANE_COUNT = ctrl_simd::size();
-    using ctrl_mask = ctrl_simd::mask_type;
+    using ctrl_mask = eve::logical<ctrl_simd>;
 
     using ctrl_t = uint8_t;
 
@@ -62,14 +62,19 @@ namespace alp
 
             Iterator& operator++()
             {
-                mask[idx] = false;
-                if (simd::any_of(mask))
+                // Clear the current bit using if_else: set idx position to false
+                auto clearMask = ctrl_mask {false};
+                clearMask.set(idx, true);
+                mask = eve::if_else(clearMask, eve::false_(eve::as(mask)), mask);
+
+                auto nextIdx = eve::first_true(mask);
+                if (nextIdx)
                 {
-                    idx = simd::find_first_set(mask);
+                    idx = static_cast<size_t>(*nextIdx);
                 }
                 else
                 {
-                    idx = mask.size();
+                    idx = LANE_COUNT;
                 }
                 return *this;
             }
@@ -79,13 +84,12 @@ namespace alp
 
         Iterator begin() const
         {
-            return {
-                mask,
-                simd::any_of(mask) ? static_cast<size_t>(simd::find_first_set(mask)) : mask.size()};
+            auto firstIdx = eve::first_true(mask);
+            return {mask, firstIdx ? static_cast<size_t>(*firstIdx) : LANE_COUNT};
         }
-        Iterator end() const { return {mask, mask.size()}; }
+        Iterator end() const { return {mask, LANE_COUNT}; }
 
-        explicit operator bool() const { return simd::any_of(mask); }
+        explicit operator bool() const { return eve::any(mask); }
     };
 
     /// A group of control bytes, the fundamental unit of Swiss Table probing.
@@ -94,30 +98,36 @@ namespace alp
     {
         ctrl_simd data;
 
-        explicit Group(ctrl_t const* ctrl) { data.copy_from(ctrl, simd::element_aligned_tag {}); }
+        /// Constructs a Group by loading control bytes from memory.
+        /// EVE's wide constructor handles aligned loads with VMOVDQA.
+        explicit Group(ctrl_t const* ctrl)
+            : data(ctrl)
+        {
+        }
 
         /// Returns an iterator over all slots in the group of slots
         /// whose control hash matches.
-        MatchIterable match(uint8_t h2) const { return MatchIterable {data == h2}; }
+        MatchIterable match(uint8_t h2) const { return MatchIterable {data == ctrl_simd(h2)}; }
 
         /// Returns a mask of all slots in the group that contain a value.
         /// (Not empty, deleted, or sentinel)
-        auto matchFull() const
+        ctrl_mask matchFull() const
         {
             return (data != static_cast<ctrl_t>(Ctrl::Empty))
                 && (data != static_cast<ctrl_t>(Ctrl::Deleted))
                 && (data != static_cast<ctrl_t>(Ctrl::Sentinel));
         }
 
-        auto matchEmpty() const { return data == static_cast<ctrl_t>(Ctrl::Empty); }
+        ctrl_mask matchEmpty() const { return data == static_cast<ctrl_t>(Ctrl::Empty); }
 
         /// Returns true if and only if there exists a slot in the group that has Ctrl::Empty.
-        bool anyEmpty() const { return simd::any_of(matchEmpty()); }
+        bool anyEmpty() const { return eve::any(matchEmpty()); }
 
-        bool atEnd() const { return simd::any_of(data == static_cast<ctrl_t>(Ctrl::Sentinel)); }
+        /// Returns true if we've reached the sentinel at the end of the control array.
+        bool atEnd() const { return eve::any(data == static_cast<ctrl_t>(Ctrl::Sentinel)); }
 
         /// Returns true if and only if there exists a slot that isn't empty, deleted, or sentinel.
-        bool hasValue() const { return simd::any_of(matchFull()); }
+        bool hasValue() const { return eve::any(matchFull()); }
     };
 
     /// A hash policy that mixes bits to protect against poor std::hash implementations.
@@ -231,14 +241,18 @@ namespace alp
             auto const offset = groupOffset();
             Group g {groupPtr};
             auto mask = g.matchFull();
+            // Clear bits before offset using if_else with a mask
+            ctrl_mask clearMask {false};
             for (int i = 0; i < offset; ++i)
             {
-                mask[i] = false;
+                clearMask.set(i, true);
             }
+            mask = eve::if_else(clearMask, eve::false_(eve::as(mask)), mask);
 
-            if (simd::any_of(mask))
+            auto firstIdx = eve::first_true(mask);
+            if (firstIdx)
             {
-                int idx = simd::find_first_set(mask);
+                int idx = static_cast<int>(*firstIdx);
                 int jump = idx - offset;
                 ctrl += jump;
                 slot += jump;
@@ -262,9 +276,10 @@ namespace alp
                 Group g {ctrl};
                 auto mask = g.matchFull();
 
-                if (simd::any_of(mask))
+                auto firstIdx = eve::first_true(mask);
+                if (firstIdx)
                 {
-                    int nextIndex = simd::find_first_set(mask);
+                    int nextIndex = static_cast<int>(*firstIdx);
                     ctrl += nextIndex;
                     slot += nextIndex;
                     return *this;
@@ -498,7 +513,8 @@ namespace alp
                 }
 
                 auto empty = g.matchEmpty();
-                if (simd::any_of(empty))
+                auto emptyIdx = eve::first_true(empty);
+                if (emptyIdx)
                 {
                     if (size_ + 1 > capacity_ * MAX_LOAD_FACTOR)
                     {
@@ -506,7 +522,7 @@ namespace alp
                         return emplace_internal(value, h1Val, h2Val);
                     }
 
-                    int offset = simd::find_first_set(empty);
+                    int offset = static_cast<int>(*emptyIdx);
                     size_t idx = baseSlot + offset;
 
                     ctrl_[idx] = h2Val;
@@ -630,9 +646,10 @@ namespace alp
                     Group g {newCtrl + group * LANE_COUNT};
                     auto emptyMask = g.matchEmpty();
 
-                    if (simd::any_of(emptyMask))
+                    auto emptyIdx = eve::first_true(emptyMask);
+                    if (emptyIdx)
                     {
-                        int offset = simd::find_first_set(emptyMask);
+                        int offset = static_cast<int>(*emptyIdx);
                         size_t idx = group * LANE_COUNT + offset;
 
                         if constexpr (std::is_trivially_copyable_v<T>)
@@ -687,7 +704,7 @@ namespace alp
 
         static ctrl_t* allocate(size_t count)
         {
-            constexpr size_t alignment = simd::memory_alignment_v<ctrl_simd>;
+            constexpr size_t alignment = ctrl_simd::alignment();
             return static_cast<ctrl_t*>(std::aligned_alloc(alignment, sizeof(ctrl_t) * count));
         }
     };
