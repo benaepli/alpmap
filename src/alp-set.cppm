@@ -86,7 +86,7 @@ namespace alp
         /// Returns true if and only if there exists a slot in the group that has Ctrl::Empty.
         bool anyEmpty() const { return matchAgainst(static_cast<uint8_t>(Ctrl::Empty)) != 0; }
 
-        bool atEnd() const { return matchAgainst(static_cast<uint8_t>(Ctrl::Sentinel) != 0); }
+        bool atEnd() const { return matchAgainst(static_cast<uint8_t>(Ctrl::Sentinel)) != 0; }
 
         /// Returns true if and only if there exists a slot that isn't empty, deleted, or sentinel.
         bool hasValue() const { return matchNoValue() != 0xFFFF; }
@@ -128,7 +128,7 @@ namespace alp
     };
 
     // A policy for when the user provides a high-quality hash and wants to skip mixing
-    struct IdentityHashPolicy
+    export struct IdentityHashPolicy
     {
         static constexpr size_t apply(size_t h) { return h; }
     };
@@ -238,7 +238,8 @@ namespace alp
             }
         }
 
-        template<typename U, typename Hash, typename Equal>
+        template<typename U, typename Hash, typename Equal, typename Policy>
+            requires std::move_constructible<U>
         friend class Set;
     };
 
@@ -300,7 +301,7 @@ namespace alp
                     // Clean up: destroy all successfully constructed elements
                     for (size_t i = 0; i < capacity_; ++i)
                     {
-                        if ((ctrl_[i] & 0x80) == 0) // isFull check
+                        if ((ctrl_[i] & 0x80) == 0)  // isFull check
                         {
                             slots_[i].element()->~T();
                         }
@@ -375,7 +376,7 @@ namespace alp
         {
             if (self.size_ == 0)
             {
-                return end();
+                return self.end();
             }
 
             auto h = hasher {};
@@ -388,7 +389,7 @@ namespace alp
                 Group g {self.ctrl_ + group * 16};
                 for (int i : g.match(h2))
                 {
-                    if (key == self.slots_[group * 16 + i])
+                    if (Equal {}(key, *self.slots_[group * 16 + i].element()))
                     {
                         return self.iteratorAt(group * 16 + i);
                     }
@@ -452,7 +453,6 @@ namespace alp
         template<typename... Args>
         std::pair<iterator, bool> emplace(Args&&... args)
         {
-            // Construct temporary element to compute hash
             alignas(T) uint8_t tempStorage[sizeof(T)];
             T* temp =
                 std::construct_at(reinterpret_cast<T*>(tempStorage), std::forward<Args>(args)...);
@@ -462,53 +462,17 @@ namespace alp
             auto h1Val = h1(hash);
             auto h2Val = h2(hash);
 
-            size_t mask = groups_ - 1;
-            size_t group = h1Val & mask;
+            auto result = emplace_internal(*temp, h1Val, h2Val);
 
-            while (true)
-            {
-                auto baseSlot = group * 16;
-                Group g {ctrl_ + baseSlot};
-                BitMaskIterable candidates = g.match(h2Val);
-                for (auto i : candidates)
-                {
-                    auto slotNumber = baseSlot + i;
-                    T const& result = *slots_[slotNumber].element();
-                    if (Equal {}(result, *temp))
-                    {
-                        temp->~T();  // Destroy temporary since element already exists
-                        return {iteratorAt(slotNumber), false};
-                    }
-                }
+            temp->~T();
 
-                auto empty = g.matchEmpty();
-                if (empty != 0)
-                {
-                    auto nextSize = size_ + 1;
-                    if (nextSize > capacity_ * MAX_LOAD_FACTOR)
-                    {
-                        // TODO: make more efficient
-                        temp->~T();
-                        reserve(nextSize);
-                        return emplace(std::forward<Args>(args)...);
-                    }
-
-                    int offset = std::countr_zero(empty);
-                    size_t idx = baseSlot + offset;
-                    ctrl_[idx] = h2Val;
-                    std::construct_at(slots_[idx].element(), std::move(*temp));
-                    temp->~T();
-                    size_++;
-                    return {iteratorAt(idx), true};
-                }
-
-                group = (group + 1) & mask;
-            }
+            return result;
         }
 
         void erase(const_iterator pos)
         {
-            pos.slot->element()->T();
+            pos.slot->element()->~T();
+            --size_;
 
             auto groupPtr = pos.alignedGroup();
             Group g {groupPtr};
@@ -537,7 +501,7 @@ namespace alp
         std::expected<std::reference_wrapper<T>, Error> get(T const& key)
         {
             if (auto it = find(key); it != end())
-                return std::ref(*it);
+                return std::ref(*it->element());
             return std::unexpected(Error::NotFound);
         }
 
@@ -564,6 +528,51 @@ namespace alp
         friend void swap(Set& lhs, Set& rhs) noexcept { lhs.swap(rhs); }
 
       private:
+        std::pair<iterator, bool> emplace_internal(T& value, size_t h1Val, ctrl_t h2Val)
+        {
+            size_t mask = groups_ - 1;
+            size_t group = h1Val & mask;
+
+            while (true)
+            {
+                auto baseSlot = group * 16;
+                Group g {ctrl_ + baseSlot};
+
+                BitMaskIterable candidates = g.match(h2Val);
+                for (auto i : candidates)
+                {
+                    auto slotNumber = baseSlot + i;
+                    T const& result = *slots_[slotNumber].element();
+
+                    if (Equal {}(result, value))
+                    {
+                        return {iteratorAt(slotNumber), false};
+                    }
+                }
+
+                auto empty = g.matchEmpty();
+                if (empty != 0)
+                {
+                    if (size_ + 1 > capacity_ * MAX_LOAD_FACTOR)
+                    {
+                        reserve(size_ + 1);
+                        return emplace_internal(value, h1Val, h2Val);
+                    }
+
+                    int offset = std::countr_zero(empty);
+                    size_t idx = baseSlot + offset;
+
+                    ctrl_[idx] = h2Val;
+                    std::construct_at(slots_[idx].element(), std::move(value));
+                    size_++;
+
+                    return {iteratorAt(idx), true};
+                }
+
+                group = (group + 1) & mask;
+            }
+        }
+
         // Incorporate the policy mix directly into these helpers
         static constexpr size_t h1(size_t hash)
         {
@@ -583,7 +592,7 @@ namespace alp
         iterator iteratorAt(size_t offset) { return {ctrl_ + offset, slots_.data() + offset}; }
         const_iterator iteratorAt(size_t offset) const
         {
-            return {ctrl_ + offset, slots_.data() + offset};
+            return {const_cast<ctrl_t*>(ctrl_ + offset), const_cast<Slot<T>*>(slots_.data() + offset)};
         }
 
         /// Finds the smallest n such that  16 * n >= count + 1
