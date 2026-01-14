@@ -123,7 +123,7 @@ namespace alp
 
     /// A hash policy that mixes bits to protect against poor std::hash implementations.
     /// Uses MurmurHash3's 64-bit finalizer for high-quality bit distribution.
-    struct MixHashPolicy
+    export struct MixHashPolicy
     {
         static constexpr size_t apply(size_t h)
         {
@@ -308,7 +308,7 @@ namespace alp
             , capacity_(other.capacity_)
             , ctrlLen_(other.ctrlLen_)
             , groups_(other.groups_)
-            , slots_(other.capacity_)
+            , slots_(other.capacity_ > 0 ? new Slot<T>[other.capacity_] : nullptr)
         {
             if (other.ctrl_ == nullptr)
             {
@@ -415,7 +415,7 @@ namespace alp
             used_ = 0;
             capacity_ = 0;
             ctrlLen_ = 0;
-            slots_.clear();
+            slots_.reset();
             ctrl_ = nullptr;
         }
 
@@ -465,11 +465,62 @@ namespace alp
             }
         }
 
-        /// Core insertion logic. Constructs the element, checks for duplicates,
+        /// Core insertion logic. Checks for duplicates using SIMD probing,
         /// triggers rehash if needed, and inserts into an empty slot.
         /// Returns the index and whether insertion occurred.
+        std::pair<size_t, bool> emplace_internal(T& value, size_t h1Val, ctrl_t h2Val)
+        {
+            if (capacity_ == 0)
+            {
+                reserve(1);
+            }
+            size_t mask = groups_ - 1;
+            size_t group = h1Val & mask;
+
+            while (true)
+            {
+                auto baseSlot = group * 16;
+                Group g {ctrl_ + baseSlot};
+
+                BitMaskIterable candidates = g.match(h2Val);
+                for (auto i : candidates)
+                {
+                    auto slotNumber = baseSlot + i;
+                    T const& result = *slots_[slotNumber].element();
+
+                    if (Equal {}(result, value))
+                    {
+                        return {slotNumber, false};
+                    }
+                }
+
+                auto empty = g.matchEmpty();
+                if (empty != 0)
+                {
+                    if (size_ + 1 > capacity_ * MAX_LOAD_FACTOR)
+                    {
+                        reserve(size_ + 1);
+                        return emplace_internal(value, h1Val, h2Val);
+                    }
+
+                    int offset = std::countr_zero(empty);
+                    size_t idx = baseSlot + offset;
+
+                    ctrl_[idx] = h2Val;
+                    std::construct_at(slots_[idx].element(), std::move(value));
+                    size_++;
+
+                    return {idx, true};
+                }
+
+                group = (group + 1) & mask;
+            }
+        }
+
+        /// Wrapper that constructs a temporary element and computes the hash
+        /// before delegating to the core insertion logic.
         template<typename... Args>
-        std::pair<size_t, bool> emplace_internal(Args&&... args)
+        std::pair<size_t, bool> emplace_wrapper(Args&&... args)
         {
             alignas(T) uint8_t tempStorage[sizeof(T)];
             T* temp =
@@ -480,38 +531,11 @@ namespace alp
             auto h1Val = h1(hash);
             auto h2Val = h2(hash);
 
-            size_t idx = find_internal(*temp);
-            if (idx != ctrlLen_)
-            {
-                temp->~T();
-                return {idx, false};
-            }
+            auto result = emplace_internal(*temp, h1Val, h2Val);
 
-            if (capacity_ == 0 || size_ + 1 > capacity_ * MAX_LOAD_FACTOR)
-            {
-                reserve(size_ + 1);
-            }
+            temp->~T();
 
-            // Re-find position after potential rehash
-            size_t mask = groups_ - 1;
-            size_t group = h1Val & mask;
-            while (true)
-            {
-                auto baseSlot = group * 16;
-                Group g {ctrl_ + baseSlot};
-                auto empty = g.matchEmpty();
-                if (empty != 0)
-                {
-                    int offset = std::countr_zero(empty);
-                    size_t final_idx = baseSlot + offset;
-                    ctrl_[final_idx] = h2Val;
-                    std::construct_at(slots_[final_idx].element(), std::move(*temp));
-                    temp->~T();
-                    size_++;
-                    return {final_idx, true};
-                }
-                group = (group + 1) & mask;
-            }
+            return result;
         }
 
         void reserve(size_type count)
@@ -559,10 +583,10 @@ namespace alp
         /// Extracts the lower 7 bits for control byte matching.
         static constexpr ctrl_t h2(size_t hash) { return Policy::apply(hash) & 0x7F; }
 
-        iterator iteratorAt(size_t offset) { return {ctrl_ + offset, slots_.data() + offset}; }
+        iterator iteratorAt(size_t offset) { return {ctrl_ + offset, slots_.get() + offset}; }
         const_iterator iteratorAt(size_t offset) const
         {
-            return iterator {(ctrl_ + offset), const_cast<Slot<T>*>(slots_.data() + offset)};
+            return iterator {(ctrl_ + offset), const_cast<Slot<T>*>(slots_.get() + offset)};
         }
 
         size_t size_ = 0;
@@ -570,7 +594,7 @@ namespace alp
         size_t capacity_ = 0;
         size_t ctrlLen_ = 0;
         size_t groups_ = 0;
-        std::vector<Slot<T>> slots_;
+        std::unique_ptr<Slot<T>[]> slots_;
         ctrl_t* ctrl_ = nullptr;
 
       private:
@@ -588,10 +612,12 @@ namespace alp
             auto newCapacity = count - 1;
             auto* newCtrl = allocate(count);
 
-            std::vector<Slot<T>> newSlots(newCapacity);
+            // Allocate raw memory without initialization
+            std::unique_ptr<Slot<T>[]> newSlots(new Slot<T>[newCapacity]);
             std::memset(newCtrl, static_cast<ctrl_t>(Ctrl::Empty), newCapacity);
             newCtrl[newCapacity] = static_cast<ctrl_t>(Ctrl::Sentinel);
 
+            // Lambda to insert an element into the new table, moving and destroying in place
             auto insertNew = [&](Slot<T>& value)
             {
                 auto hash = Hash {}(*value.element());
@@ -615,6 +641,8 @@ namespace alp
 
                         std::construct_at(newSlots[idx].element(), std::move(*value.element()));
                         newCtrl[idx] = h2Val;
+                        // Destroy the moved-from element immediately
+                        value.element()->~T();
                         return;
                     }
 
@@ -622,6 +650,7 @@ namespace alp
                 }
             };
 
+            // Single pass: move elements to new table and destroy originals
             if (capacity_ > 0)
             {
                 ctrl_t* current = ctrl_;
@@ -632,23 +661,6 @@ namespace alp
                     {
                         auto& old = slots_[current - ctrl_ + i];
                         insertNew(old);
-                    }
-                    if (g.atEnd())
-                    {
-                        break;
-                    }
-                    current += 16;
-                }
-
-                current = ctrl_;
-                while (true)
-                {
-                    Group g(current);
-                    for (auto i : BitMaskIterable(g.matchFull()))
-                    {
-                        // Destroy moved-from elements before freeing memory
-                        auto& old = slots_[current - ctrl_ + i];
-                        old.element()->~T();
                     }
                     if (g.atEnd())
                     {
@@ -753,8 +765,24 @@ namespace alp
         template<typename... Args>
         std::pair<iterator, bool> emplace(Args&&... args)
         {
-            auto [idx, success] = Base::emplace_internal(std::forward<Args>(args)...);
+            auto [idx, success] = Base::emplace_wrapper(std::forward<Args>(args)...);
             return {Base::iteratorAt(idx), success};
+        }
+
+        /// Inserts the given value into the set.
+        /// Returns a pair of an iterator to the element and a bool indicating
+        /// whether insertion took place (true) or the element already existed (false).
+        std::pair<iterator, bool> insert(T const& value)
+        {
+            return emplace(value);
+        }
+
+        /// Inserts the given value into the set by moving it.
+        /// Returns a pair of an iterator to the element and a bool indicating
+        /// whether insertion took place (true) or the element already existed (false).
+        std::pair<iterator, bool> insert(T&& value)
+        {
+            return emplace(std::move(value));
         }
 
         void erase(const_iterator pos)

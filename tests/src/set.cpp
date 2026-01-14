@@ -12,7 +12,7 @@ import alp;
 
 namespace
 {
-    int g_destruction_count = 0;
+    int gDestructionCount = 0;
     struct DestructorCounter
     {
         int value;
@@ -30,7 +30,7 @@ namespace
         }
         DestructorCounter& operator=(DestructorCounter const&) = default;
         DestructorCounter& operator=(DestructorCounter&&) noexcept = default;
-        ~DestructorCounter() { ++g_destruction_count; }
+        ~DestructorCounter() { ++gDestructionCount; }
         bool operator==(DestructorCounter const& other) const { return value == other.value; }
     };
 
@@ -44,8 +44,8 @@ namespace
     struct ThrowsOnCopy
     {
         int value;
-        static int copy_count;
-        static int throw_after;
+        static int copyCount;
+        static int throwAfter;
         explicit ThrowsOnCopy(int v)
             : value(v)
         {
@@ -57,7 +57,7 @@ namespace
         ThrowsOnCopy(ThrowsOnCopy const& other)
             : value(other.value)
         {
-            if (++copy_count >= throw_after)
+            if (++copyCount >= throwAfter)
             {
                 throw std::runtime_error("Copy failed");
             }
@@ -67,8 +67,8 @@ namespace
         ~ThrowsOnCopy() = default;
         bool operator==(ThrowsOnCopy const& other) const { return value == other.value; }
     };
-    int ThrowsOnCopy::copy_count = 0;
-    int ThrowsOnCopy::throw_after = 100;
+    int ThrowsOnCopy::copyCount = 0;
+    int ThrowsOnCopy::throwAfter = 100;
 }  // namespace
 
 template<>
@@ -179,7 +179,7 @@ TEST(SetCore, ClearAndEmpty)
 }
 TEST(SetCore, DestructorCounting)
 {
-    g_destruction_count = 0;
+    gDestructionCount = 0;
     {
         alp::Set<DestructorCounter> s;
         s.emplace(1);
@@ -189,20 +189,20 @@ TEST(SetCore, DestructorCounting)
     }
     // After set goes out of scope, destructors should be called
     // Note: emplace creates a temp object that gets destroyed, so count may be higher
-    EXPECT_GE(g_destruction_count, 3);
+    EXPECT_GE(gDestructionCount, 3);
 }
 TEST(SetCore, ClearCallsDestructors)
 {
-    g_destruction_count = 0;
+    gDestructionCount = 0;
     alp::Set<DestructorCounter> s;
     s.emplace(1);
     s.emplace(2);
     s.emplace(3);
-    int count_before_clear = g_destruction_count;
+    int countBeforeClear = gDestructionCount;
     s.clear();
-    int count_after_clear = g_destruction_count;
+    int countAfterClear = gDestructionCount;
     // Clear should destroy exactly the 3 elements
-    EXPECT_EQ(count_after_clear - count_before_clear, 3);
+    EXPECT_EQ(countAfterClear - countBeforeClear, 3);
 }
 
 TEST(SetGroup, ExactlyOneGroup)
@@ -570,15 +570,15 @@ TEST(SetTypes, Swap)
 TEST(SetTypes, ExceptionDuringCopy)
 {
     // This test verifies copy constructor exception safety
-    ThrowsOnCopy::copy_count = 0;
-    ThrowsOnCopy::throw_after = 3;  // Throw on 3rd copy
+    ThrowsOnCopy::copyCount = 0;
+    ThrowsOnCopy::throwAfter = 3;  // Throw on 3rd copy
     alp::Set<ThrowsOnCopy> s1;
     s1.emplace(1);
     s1.emplace(2);
     s1.emplace(3);
     s1.emplace(4);
     s1.emplace(5);
-    ThrowsOnCopy::copy_count = 0;  // Reset before copy
+    ThrowsOnCopy::copyCount = 0;  // Reset before copy
     EXPECT_THROW(
         {
             alp::Set<ThrowsOnCopy> s2(s1);
@@ -588,7 +588,7 @@ TEST(SetTypes, ExceptionDuringCopy)
     // Original set should still be valid
     EXPECT_EQ(s1.size(), 5);
     // Reset for cleanup
-    ThrowsOnCopy::throw_after = 100;
+    ThrowsOnCopy::throwAfter = 100;
 }
 
 TEST(SetEdge, GetSuccess)

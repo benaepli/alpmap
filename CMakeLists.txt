@@ -9,6 +9,7 @@ set(CMAKE_CXX_SCAN_FOR_MODULES ON)
 
 # Build options
 option(BUILD_TESTS "Build test programs" ON)
+option(BUILD_BENCHMARKS "Build benchmark programs" OFF)
 option(BUILD_DOCS "Build Doxygen documentation" ON)
 
 
@@ -44,6 +45,10 @@ target_compile_features(alpmap PUBLIC cxx_std_23)
 if (BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
+endif ()
+
+if (BUILD_BENCHMARKS)
+    add_subdirectory(benchmarks)
 endif ()
 
 if (BUILD_DOCS)
