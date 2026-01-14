@@ -10,12 +10,18 @@ module;
 #include <utility>
 #include <vector>
 
-#include <emmintrin.h>
+#include <experimental/simd>
 
 export module alp:set;
 
 namespace alp
 {
+    namespace simd = std::experimental;
+
+    using ctrl_simd = simd::fixed_size_simd<uint8_t, 32>;
+    constexpr size_t LANE_COUNT = ctrl_simd::size();
+    using ctrl_mask = ctrl_simd::mask_type;
+
     using ctrl_t = uint8_t;
 
     export enum class Error : uint8_t
@@ -28,7 +34,7 @@ namespace alp
         Empty = 0b10000000,
         Deleted = 0b11111110,
         // The sentinel value indicates that we have reached the end of the array.
-        // It is located at the fifteenth (last byte) of each group.
+        // It is located at the last byte of the control array.
         Sentinel = 0b11111111,
     };
 
@@ -43,82 +49,75 @@ namespace alp
         T const* element() const { return reinterpret_cast<T const*>(storage); }
     };
 
-    /// A helper class for iterating over the set bits in a 16-bit mask.
-    /// Used to iterate over matching slots in a SIMD group.
-    class BitMaskIterable
+    struct MatchIterable
     {
-      public:
-        explicit BitMaskIterable(uint32_t mask)
-            : mask_(mask)
-        {
-        }
+        ctrl_mask mask;
 
         struct Iterator
         {
-            uint32_t mask;
+            ctrl_mask mask;
+            size_t idx;
 
-            int operator*() const { return std::countr_zero(mask); }
+            int operator*() const { return static_cast<int>(idx); }
 
             Iterator& operator++()
             {
-                mask &= (mask - 1);
+                mask[idx] = false;
+                if (simd::any_of(mask))
+                {
+                    idx = simd::find_first_set(mask);
+                }
+                else
+                {
+                    idx = mask.size();
+                }
                 return *this;
             }
 
-            bool operator!=(Iterator const& other) const { return mask != other.mask; }
+            bool operator!=(Iterator const& other) const { return idx != other.idx; }
         };
 
-        Iterator begin() const { return Iterator {mask_}; }
-        Iterator end() const { return Iterator {0}; }
+        Iterator begin() const
+        {
+            return {
+                mask,
+                simd::any_of(mask) ? static_cast<size_t>(simd::find_first_set(mask)) : mask.size()};
+        }
+        Iterator end() const { return {mask, mask.size()}; }
 
-        explicit operator bool() const { return mask_ != 0; }
-
-      private:
-        uint32_t mask_;
+        explicit operator bool() const { return simd::any_of(mask); }
     };
 
-    /// A group of 16 control bytes, the fundamental unit of Swiss Table probing.
-    /// Uses SSE/SIMD instructions for fast parallel matching.
+    /// A group of control bytes, the fundamental unit of Swiss Table probing.
+    /// Uses SIMD instructions for fast parallel matching.
     struct Group
     {
-        ctrl_t const* ctrl;
+        ctrl_simd data;
 
-        /// Returns an iterator over all slots in the group of sixteen slots
+        explicit Group(ctrl_t const* ctrl) { data.copy_from(ctrl, simd::element_aligned_tag {}); }
+
+        /// Returns an iterator over all slots in the group of slots
         /// whose control hash matches.
-        BitMaskIterable match(uint8_t h2) const { return BitMaskIterable(matchAgainst(h2)); }
+        MatchIterable match(uint8_t h2) const { return MatchIterable {data == h2}; }
 
-        /// Returns a bit mask of all slots in the group that contain a value.
-        uint32_t matchFull() const { return (~matchNoValue()) & 0xFFFF; }
+        /// Returns a mask of all slots in the group that contain a value.
+        /// (Not empty, deleted, or sentinel)
+        auto matchFull() const
+        {
+            return (data != static_cast<ctrl_t>(Ctrl::Empty))
+                && (data != static_cast<ctrl_t>(Ctrl::Deleted))
+                && (data != static_cast<ctrl_t>(Ctrl::Sentinel));
+        }
 
-        uint32_t matchEmpty() const { return matchAgainst(static_cast<uint8_t>(Ctrl::Empty)); }
+        auto matchEmpty() const { return data == static_cast<ctrl_t>(Ctrl::Empty); }
 
         /// Returns true if and only if there exists a slot in the group that has Ctrl::Empty.
-        bool anyEmpty() const { return matchAgainst(static_cast<uint8_t>(Ctrl::Empty)) != 0; }
+        bool anyEmpty() const { return simd::any_of(matchEmpty()); }
 
-        bool atEnd() const { return matchAgainst(static_cast<uint8_t>(Ctrl::Sentinel)) != 0; }
+        bool atEnd() const { return simd::any_of(data == static_cast<ctrl_t>(Ctrl::Sentinel)); }
 
         /// Returns true if and only if there exists a slot that isn't empty, deleted, or sentinel.
-        bool hasValue() const { return matchNoValue() != 0xFFFF; }
-
-      private:
-        uint32_t matchNoValue() const
-        {
-            auto data = _mm_loadu_si128(reinterpret_cast<__m128i const*>(ctrl));
-            // High bit is 1 for empty, deleted, and sentinel
-            return static_cast<uint32_t>(_mm_movemask_epi8(data));
-        }
-
-        auto mask(uint8_t val) const
-        {
-            auto match = _mm_set1_epi8(val);
-            auto data = _mm_loadu_si128(reinterpret_cast<__m128i const*>(ctrl));
-            return _mm_cmpeq_epi8(match, data);
-        }
-
-        uint32_t matchAgainst(uint8_t val) const
-        {
-            return static_cast<uint32_t>(_mm_movemask_epi8(mask(val)));
-        }
+        bool hasValue() const { return simd::any_of(matchFull()); }
     };
 
     /// A hash policy that mixes bits to protect against poor std::hash implementations.
@@ -207,15 +206,17 @@ namespace alp
 
         [[nodiscard]] ctrl_t* alignedGroup() const
         {
+            // We align down to LANE_COUNT boundary.
+            // Note: ctrl_t is 1 byte, so address arithmetic works directly.
             auto addr = reinterpret_cast<uintptr_t>(ctrl);
-            auto alignedAddr = addr & ~static_cast<uintptr_t>(15);
+            auto alignedAddr = addr & ~static_cast<uintptr_t>(LANE_COUNT - 1);
             return reinterpret_cast<ctrl_t*>(alignedAddr);
         }
 
         [[nodiscard]] int groupOffset() const
         {
             auto addr = reinterpret_cast<uintptr_t>(ctrl);
-            return static_cast<int>(addr & 15);
+            return static_cast<int>(addr & (LANE_COUNT - 1));
         }
 
         SetIterator& skipEmptySlots()
@@ -229,22 +230,24 @@ namespace alp
             }
             auto const offset = groupOffset();
             Group g {groupPtr};
-            uint32_t mask = g.matchFull();
-            // Zero out all in our mask before the current element.
-            mask &= ~((1U << (offset + 1)) - 1);
-            if (mask != 0)
+            auto mask = g.matchFull();
+            for (int i = 0; i < offset; ++i)
             {
-                int nextIndex = std::countr_zero(mask);
-                int jump = nextIndex - offset;
+                mask[i] = false;
+            }
+
+            if (simd::any_of(mask))
+            {
+                int idx = simd::find_first_set(mask);
+                int jump = idx - offset;
                 ctrl += jump;
                 slot += jump;
                 return *this;
             }
-            int jumpToNext = 16 - offset;
+
+            int jumpToNext = LANE_COUNT - offset;
             ctrl += jumpToNext;
             slot += jumpToNext;
-            // The group `g` references our old pointer, so skipping to the next
-            // would mean that we're past the end of the control block.
             if (g.atEnd())
             {
                 return *this;
@@ -257,18 +260,18 @@ namespace alp
             while (true)
             {
                 Group g {ctrl};
-                uint32_t mask = g.matchFull();
+                auto mask = g.matchFull();
 
-                if (mask != 0)
+                if (simd::any_of(mask))
                 {
-                    int nextIndex = std::countr_zero(mask);
+                    int nextIndex = simd::find_first_set(mask);
                     ctrl += nextIndex;
                     slot += nextIndex;
                     return *this;
                 }
 
-                ctrl += 16;
-                slot += 16;
+                ctrl += LANE_COUNT;
+                slot += LANE_COUNT;
                 if (g.atEnd())
                 {
                     return *this;
@@ -314,7 +317,7 @@ namespace alp
             {
                 return;
             }
-            size_t allocSize = 16 * groups_;
+            size_t allocSize = LANE_COUNT * groups_;
             ctrl_ = allocate(allocSize);
             std::memset(ctrl_, static_cast<ctrl_t>(Ctrl::Empty), allocSize * sizeof(ctrl_t));
 
@@ -449,12 +452,12 @@ namespace alp
 
             while (true)
             {
-                Group g {ctrl_ + group * 16};
+                Group g {ctrl_ + group * LANE_COUNT};
                 for (int i : g.match(h2Val))
                 {
-                    if (Equal {}(key, *slots_[group * 16 + i].element()))
+                    if (Equal {}(key, *slots_[group * LANE_COUNT + i].element()))
                     {
-                        return group * 16 + i;
+                        return group * LANE_COUNT + i;
                     }
                 }
                 if (g.anyEmpty())
@@ -479,10 +482,10 @@ namespace alp
 
             while (true)
             {
-                auto baseSlot = group * 16;
+                auto baseSlot = group * LANE_COUNT;
                 Group g {ctrl_ + baseSlot};
 
-                BitMaskIterable candidates = g.match(h2Val);
+                MatchIterable candidates = g.match(h2Val);
                 for (auto i : candidates)
                 {
                     auto slotNumber = baseSlot + i;
@@ -495,7 +498,7 @@ namespace alp
                 }
 
                 auto empty = g.matchEmpty();
-                if (empty != 0)
+                if (simd::any_of(empty))
                 {
                     if (size_ + 1 > capacity_ * MAX_LOAD_FACTOR)
                     {
@@ -503,7 +506,7 @@ namespace alp
                         return emplace_internal(value, h1Val, h2Val);
                     }
 
-                    int offset = std::countr_zero(empty);
+                    int offset = simd::find_first_set(empty);
                     size_t idx = baseSlot + offset;
 
                     ctrl_[idx] = h2Val;
@@ -564,7 +567,7 @@ namespace alp
             --size_;
 
             auto addr = reinterpret_cast<uintptr_t>(ctrl_ + offset);
-            auto alignedAddr = addr & ~static_cast<uintptr_t>(15);
+            auto alignedAddr = addr & ~static_cast<uintptr_t>(LANE_COUNT - 1);
             auto groupPtr = reinterpret_cast<ctrl_t*>(alignedAddr);
 
             Group g {groupPtr};
@@ -603,16 +606,15 @@ namespace alp
         static size_t findSmallestN(size_t count)
         {
             size_t min_capacity = count + 1;
-            return std::bit_ceil((min_capacity + 15) >> 4);
+            return std::bit_ceil((min_capacity + LANE_COUNT - 1) / LANE_COUNT);
         }
 
         void rehashImpl(size_t newGroupCount)
         {
-            auto count = 16 * newGroupCount;
+            auto count = LANE_COUNT * newGroupCount;
             auto newCapacity = count - 1;
             auto* newCtrl = allocate(count);
 
-            // Allocate raw memory without initialization
             std::unique_ptr<Slot<T>[]> newSlots(new Slot<T>[newCapacity]);
             std::memset(newCtrl, static_cast<ctrl_t>(Ctrl::Empty), newCapacity);
             newCtrl[newCapacity] = static_cast<ctrl_t>(Ctrl::Sentinel);
@@ -625,16 +627,13 @@ namespace alp
 
                 while (true)
                 {
-                    Group g {newCtrl + group * 16};
-                    uint32_t emptyMask = g.matchEmpty();
+                    Group g {newCtrl + group * LANE_COUNT};
+                    auto emptyMask = g.matchEmpty();
 
-                    if (emptyMask != 0)
+                    if (simd::any_of(emptyMask))
                     {
-                        int offset = std::countr_zero(emptyMask);
-                        size_t idx = group * 16 + offset;
-
-                        // Prefetch the destination slot to hide memory latency
-                        _mm_prefetch(reinterpret_cast<char const*>(&newSlots[idx]), _MM_HINT_T0);
+                        int offset = simd::find_first_set(emptyMask);
+                        size_t idx = group * LANE_COUNT + offset;
 
                         if constexpr (std::is_trivially_copyable_v<T>)
                         {
@@ -660,12 +659,12 @@ namespace alp
             {
                 for (size_t gIdx = 0; gIdx < groups_; ++gIdx)
                 {
-                    Group g {ctrl_ + gIdx * 16};
-                    uint32_t fullMask = g.matchFull();
+                    Group g {ctrl_ + gIdx * LANE_COUNT};
+                    auto fullMask = g.matchFull();
 
-                    for (int i : BitMaskIterable(fullMask))
+                    for (int i : MatchIterable(fullMask))
                     {
-                        size_t oldIdx = gIdx * 16 + i;
+                        size_t oldIdx = gIdx * LANE_COUNT + i;
                         auto& oldSlot = slots_[oldIdx];
 
                         auto hash = Hash {}(*oldSlot.element());
@@ -688,7 +687,7 @@ namespace alp
 
         static ctrl_t* allocate(size_t count)
         {
-            constexpr size_t alignment = 16;
+            constexpr size_t alignment = simd::memory_alignment_v<ctrl_simd>;
             return static_cast<ctrl_t*>(std::aligned_alloc(alignment, sizeof(ctrl_t) * count));
         }
     };
