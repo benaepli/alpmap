@@ -143,10 +143,35 @@ namespace alp
     export template<typename T>
     struct SetIterator
     {
+        template<typename U>
+        friend struct SetIterator;
+
         ctrl_t const* ctrl;
         Slot<T>* slot;
 
-        bool operator==(SetIterator const& other) const { return ctrl == other.ctrl; }
+        SetIterator(ctrl_t const* c, Slot<T>* s)
+            : ctrl(c)
+            , slot(s)
+        {
+        }
+
+        // Converting constructor: allows iterator to convert to const_iterator
+        SetIterator(SetIterator<std::remove_const_t<T>> const& other)
+            requires std::is_const_v<T> && (!std::is_same_v<T, std::remove_const_t<T>>)
+            : ctrl(other.ctrl)
+            , slot(reinterpret_cast<Slot<T>*>(other.slot))
+        {
+        }
+
+        SetIterator(SetIterator const&) = default;
+        SetIterator& operator=(SetIterator const&) = default;
+
+        // Update comparison to work across iterator/const_iterator
+        template<typename U>
+        friend bool operator==(SetIterator<T> const& lhs, SetIterator<U> const& rhs)
+        {
+            return lhs.ctrl == rhs.ctrl;
+        }
 
         Slot<T>& operator*() const { return *slot; }
         Slot<T>* operator->() const { return slot; }
@@ -187,7 +212,8 @@ namespace alp
             auto* groupPtr = alignedGroup();
             if (groupPtr == ctrl)
             {
-                return skipEmptySlots();
+                // Already aligned, skip directly to aligned version
+                return skipEmptySlotsAligned();
             }
             auto const offset = groupOffset();
             Group g {groupPtr};
@@ -271,9 +297,9 @@ namespace alp
             : size_(other.size_)
             , used_(other.used_)
             , capacity_(other.capacity_)
+            , ctrlLen_(other.ctrlLen_)
             , groups_(other.groups_)
             , slots_(other.capacity_)
-            , ctrl_(nullptr)
         {
             if (other.ctrl_ == nullptr)
             {
@@ -312,15 +338,7 @@ namespace alp
             }
         }
 
-        Set(Set&& other) noexcept
-            : size_(0)
-            , used_(0)
-            , capacity_(0)
-            , groups_(0)
-            , ctrl_(nullptr)
-        {
-            swap(*this, other);
-        }
+        Set(Set&& other) noexcept { this->swap(other); }
 
         Set& operator=(Set const& other)
             requires std::copy_constructible<T>
@@ -336,7 +354,7 @@ namespace alp
         }
         Set& operator=(Set&& other) noexcept
         {
-            swap(*this, other);
+            this->swap(other);
             return *this;
         }
 
@@ -352,7 +370,7 @@ namespace alp
             }
             return it;
         }
-        iterator end() { return iteratorAt(capacity_); }
+        iterator end() { return iteratorAt(ctrlLen_); }
         const_iterator begin() const
         {
             auto it = iteratorAt(0);
@@ -362,7 +380,7 @@ namespace alp
             }
             return it;
         }
-        const_iterator end() const { return iteratorAt(capacity_); }
+        const_iterator end() const { return iteratorAt(ctrlLen_); }
         const_iterator cbegin() const { return begin(); }
         const_iterator cend() const { return end(); }
 
@@ -420,6 +438,7 @@ namespace alp
             size_ = 0;
             used_ = 0;
             capacity_ = 0;
+            ctrlLen_ = 0;
             slots_.clear();
             ctrl_ = nullptr;
         }
@@ -434,12 +453,12 @@ namespace alp
 
         void reserve(size_type count)
         {
-            if (count <= capacity_)
+            auto desired = static_cast<size_t>(std::ceil(count / MAX_LOAD_FACTOR));
+            if (desired <= capacity_)
             {
                 return;
             }
-
-            rehash(static_cast<size_t>(std::ceil(count / MAX_LOAD_FACTOR)));
+            rehash(desired);
         }
 
         void rehash(size_type count)
@@ -474,15 +493,17 @@ namespace alp
             pos.slot->element()->~T();
             --size_;
 
+            // Calculate offset to modify via Set's ctrl_ array
+            size_t offset = pos.ctrl - ctrl_;
             auto groupPtr = pos.alignedGroup();
             Group g {groupPtr};
             if (g.anyEmpty())
             {
-                *pos.ctrl = static_cast<ctrl_t>(Ctrl::Empty);
+                ctrl_[offset] = static_cast<ctrl_t>(Ctrl::Empty);
             }
             else
             {
-                *pos.ctrl = static_cast<ctrl_t>(Ctrl::Deleted);
+                ctrl_[offset] = static_cast<ctrl_t>(Ctrl::Deleted);
             }
         }
 
@@ -521,6 +542,7 @@ namespace alp
             swap(size_, other.size_);
             swap(used_, other.used_);
             swap(capacity_, other.capacity_);
+            swap(ctrlLen_, other.ctrlLen_);
             swap(groups_, other.groups_);
             swap(slots_, other.slots_);
             swap(ctrl_, other.ctrl_);
@@ -530,6 +552,10 @@ namespace alp
       private:
         std::pair<iterator, bool> emplace_internal(T& value, size_t h1Val, ctrl_t h2Val)
         {
+            if (capacity_ == 0)
+            {
+                reserve(1);
+            }
             size_t mask = groups_ - 1;
             size_t group = h1Val & mask;
 
@@ -592,7 +618,8 @@ namespace alp
         iterator iteratorAt(size_t offset) { return {ctrl_ + offset, slots_.data() + offset}; }
         const_iterator iteratorAt(size_t offset) const
         {
-            return {const_cast<ctrl_t*>(ctrl_ + offset), const_cast<Slot<T>*>(slots_.data() + offset)};
+            // Construct a non-const iterator, then convert via converting constructor
+            return iterator {(ctrl_ + offset), const_cast<Slot<T>*>(slots_.data() + offset)};
         }
 
         /// Finds the smallest n such that  16 * n >= count + 1
@@ -683,6 +710,7 @@ namespace alp
 
             ctrl_ = newCtrl;
             slots_ = std::move(newSlots);
+            ctrlLen_ = count;
             capacity_ = newCapacity;
             groups_ = newGroupCount;
         }
@@ -693,12 +721,13 @@ namespace alp
             return static_cast<ctrl_t*>(std::aligned_alloc(alignment, sizeof(ctrl_t) * count));
         }
 
-        size_t size_;
-        size_t used_;
-        size_t capacity_;
-        size_t groups_;
+        size_t size_ = 0;
+        size_t used_ = 0;
+        size_t capacity_ = 0;
+        size_t ctrlLen_ = 0;
+        size_t groups_ = 0;
 
         std::vector<Slot<T>> slots_;
-        ctrl_t* ctrl_;
+        ctrl_t* ctrl_ = nullptr;
     };
 }  // namespace alp

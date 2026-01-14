@@ -111,10 +111,10 @@ TEST(SetCore, BasicOperationsString)
     s.emplace("world");
     s.emplace("test");
     EXPECT_EQ(s.size(), 3);
-    EXPECT_TRUE(s.contains("hello"));
-    EXPECT_TRUE(s.contains("world"));
-    EXPECT_TRUE(s.contains("test"));
-    EXPECT_FALSE(s.contains("missing"));
+    EXPECT_TRUE(s.contains(std::string("hello")));
+    EXPECT_TRUE(s.contains(std::string("world")));
+    EXPECT_TRUE(s.contains(std::string("test")));
+    EXPECT_FALSE(s.contains(std::string("missing")));
 }
 
 TEST(SetCore, EraseByIterator)
@@ -132,6 +132,7 @@ TEST(SetCore, EraseByIterator)
     EXPECT_TRUE(s.contains(1));
     EXPECT_TRUE(s.contains(3));
 }
+
 TEST(SetCore, EraseByKey)
 {
     alp::Set<int> s;
