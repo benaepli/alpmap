@@ -7,7 +7,8 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(googletest)
 
-add_executable(alpmap_test)
+add_executable(alpmap_test
+        src/set.cpp)
 
 target_link_libraries(alpmap_test
         PRIVATE
@@ -17,7 +18,7 @@ target_link_libraries(alpmap_test
 )
 
 target_sources(alpmap_test
-    PRIVATE
+        PRIVATE
         src/alpmap_test.cpp
 )
 
