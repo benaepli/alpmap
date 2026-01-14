@@ -617,32 +617,38 @@ namespace alp
             std::memset(newCtrl, static_cast<ctrl_t>(Ctrl::Empty), newCapacity);
             newCtrl[newCapacity] = static_cast<ctrl_t>(Ctrl::Sentinel);
 
-            // Lambda to insert an element into the new table, moving and destroying in place
-            auto insertNew = [&](Slot<T>& value)
-            {
-                auto hash = Hash {}(*value.element());
-                auto h1Val = h1(hash);
-                auto h2Val = h2(hash);
+            size_t mask = newGroupCount - 1;
 
-                size_t mask = newGroupCount - 1;
-                // Calculate the desired group. Equivalent to h1Val % newGroupCount
-                // since newGroupCount is a power of 2.
+            auto insertUnchecked = [&](Slot<T>& oldSlot, size_t h1Val, ctrl_t h2Val)
+            {
                 size_t group = h1Val & mask;
 
                 while (true)
                 {
                     Group g {newCtrl + group * 16};
-                    uint32_t candidates = g.matchEmpty();
+                    uint32_t emptyMask = g.matchEmpty();
 
-                    if (candidates != 0)
+                    if (emptyMask != 0)
                     {
-                        int offset = std::countr_zero(candidates);
+                        int offset = std::countr_zero(emptyMask);
                         size_t idx = group * 16 + offset;
 
-                        std::construct_at(newSlots[idx].element(), std::move(*value.element()));
+                        // Prefetch the destination slot to hide memory latency
+                        _mm_prefetch(reinterpret_cast<char const*>(&newSlots[idx]), _MM_HINT_T0);
+
+                        if constexpr (std::is_trivially_copyable_v<T>)
+                        {
+                            // Fast path: direct memcpy for trivially copyable types
+                            std::memcpy(newSlots[idx].storage, oldSlot.storage, sizeof(T));
+                        }
+                        else
+                        {
+                            // Standard path: move construct and destroy
+                            std::construct_at(newSlots[idx].element(),
+                                              std::move(*oldSlot.element()));
+                            oldSlot.element()->~T();
+                        }
                         newCtrl[idx] = h2Val;
-                        // Destroy the moved-from element immediately
-                        value.element()->~T();
                         return;
                     }
 
@@ -650,23 +656,24 @@ namespace alp
                 }
             };
 
-            // Single pass: move elements to new table and destroy originals
             if (capacity_ > 0)
             {
-                ctrl_t* current = ctrl_;
-                while (true)
+                for (size_t gIdx = 0; gIdx < groups_; ++gIdx)
                 {
-                    Group g(current);
-                    for (auto i : BitMaskIterable(g.matchFull()))
+                    Group g {ctrl_ + gIdx * 16};
+                    uint32_t fullMask = g.matchFull();
+
+                    for (int i : BitMaskIterable(fullMask))
                     {
-                        auto& old = slots_[current - ctrl_ + i];
-                        insertNew(old);
+                        size_t oldIdx = gIdx * 16 + i;
+                        auto& oldSlot = slots_[oldIdx];
+
+                        auto hash = Hash {}(*oldSlot.element());
+                        auto h1Val = h1(hash);
+                        auto h2Val = h2(hash);
+
+                        insertUnchecked(oldSlot, h1Val, h2Val);
                     }
-                    if (g.atEnd())
-                    {
-                        break;
-                    }
-                    current += 16;
                 }
 
                 std::free(ctrl_);
@@ -688,20 +695,19 @@ namespace alp
 
     /// A hash set based on Swiss Tables.
     /// Uses SIMD-accelerated probing for efficient lookup, insertion, and deletion.
-    /// Elements are stored immutably; iterator always provides const access.
     export template<typename T,
                     typename Hash = std::hash<std::remove_cvref_t<T>>,
                     typename Equal = std::equal_to<T>,
                     typename Policy = MixHashPolicy>
         requires std::move_constructible<T>
-    class Set : private Table<T, Hash, Equal, Policy>
+    class Set : Table<T, Hash, Equal, Policy>
     {
         using Base = Table<T, Hash, Equal, Policy>;
 
       public:
         using value_type = T;
-        using size_type = typename Base::size_type;
-        using difference_type = typename Base::difference_type;
+        using size_type = Base::size_type;
+        using difference_type = Base::difference_type;
         using hasher = Hash;
         using key_equal = Equal;
         using reference = value_type&;
@@ -772,18 +778,12 @@ namespace alp
         /// Inserts the given value into the set.
         /// Returns a pair of an iterator to the element and a bool indicating
         /// whether insertion took place (true) or the element already existed (false).
-        std::pair<iterator, bool> insert(T const& value)
-        {
-            return emplace(value);
-        }
+        std::pair<iterator, bool> insert(T const& value) { return emplace(value); }
 
         /// Inserts the given value into the set by moving it.
         /// Returns a pair of an iterator to the element and a bool indicating
         /// whether insertion took place (true) or the element already existed (false).
-        std::pair<iterator, bool> insert(T&& value)
-        {
-            return emplace(std::move(value));
-        }
+        std::pair<iterator, bool> insert(T&& value) { return emplace(std::move(value)); }
 
         void erase(const_iterator pos)
         {
