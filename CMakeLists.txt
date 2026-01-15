@@ -3,7 +3,6 @@ cmake_minimum_required(VERSION 3.30)
 project(alpmap VERSION 0.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_EXTENSIONS OFF)
-set(CMAKE_CXX_STANDARD 26)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_SCAN_FOR_MODULES ON)
 
@@ -32,11 +31,6 @@ endif ()
 
 add_library(alpmap)
 
-if (ALP_USE_EVE)
-    target_compile_definitions(alpmap PRIVATE ALP_USE_EVE)
-    target_link_libraries(alpmap PRIVATE eve::eve)
-endif ()
-
 target_sources(alpmap
         PUBLIC
         FILE_SET CXX_MODULES FILES
@@ -44,11 +38,21 @@ target_sources(alpmap
         src/alp-map.cppm
         src/alp-set.cppm
         src/backends/std_simd.cppm
-        src/backends/eve.cppm
         src/backends/sse.cppm
 )
 
-target_compile_features(alpmap PUBLIC cxx_std_23)
+
+if (ALP_USE_EVE)
+    target_compile_definitions(alpmap PRIVATE ALP_USE_EVE)
+    target_link_libraries(alpmap PRIVATE eve::eve)
+    target_sources(alpmap
+            PUBLIC
+            FILE_SET CXX_MODULES FILES
+            src/backends/eve.cppm
+    )
+endif ()
+
+target_compile_features(alpmap PUBLIC cxx_std_26)
 
 if (BUILD_TESTS)
     enable_testing()

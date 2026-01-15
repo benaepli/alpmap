@@ -1,12 +1,14 @@
 module;
 
 #include <bit>
+#include <cassert>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <expected>
 #include <functional>
 #include <memory>
+
 #include <optional>
 #include <tuple>
 #include <utility>
@@ -80,6 +82,109 @@ namespace alp
         T const* element() const { return reinterpret_cast<T const*>(storage); }
     };
 
+    /// A byte wrapper that carries alignment in the type system.
+    /// Allocators respecting alignof(value_type) will automatically align.
+    template<size_t Alignment>
+    struct alignas(Alignment) AlignedByte
+    {
+        std::byte value;
+    };
+
+    /// Allocator adapter that guarantees alignment by over-allocating.
+    /// Stores original pointer in header before aligned region for deallocation.
+    template<typename Alloc, size_t Alignment>
+    struct AlignedAllocatorAdapter
+    {
+        using value_type = std::byte;
+        using InnerAllocTraits = std::allocator_traits<Alloc>;
+
+        [[no_unique_address]] Alloc inner_;
+
+        AlignedAllocatorAdapter() = default;
+
+        template<typename U>
+        explicit AlignedAllocatorAdapter(U const& alloc)
+            : inner_(alloc)
+        {
+        }
+
+        std::byte* allocate(size_t n)
+        {
+            // Over-allocate: alignment for adjustment + pointer storage
+            size_t extra = Alignment - 1 + sizeof(void*);
+            size_t totalUnits = (n + extra + sizeof(AlignedByte<Alignment>) - 1) /
+                                sizeof(AlignedByte<Alignment>);
+            auto* raw = InnerAllocTraits::allocate(inner_, totalUnits);
+            auto* rawBytes = reinterpret_cast<std::byte*>(raw);
+
+            // Align: leave room for pointer storage before aligned region
+            uintptr_t rawAddr = reinterpret_cast<uintptr_t>(rawBytes) + sizeof(void*);
+            uintptr_t alignedAddr = (rawAddr + Alignment - 1) & ~(Alignment - 1);
+            auto* aligned = reinterpret_cast<std::byte*>(alignedAddr);
+
+            // Store original pointer just before aligned region
+            auto* header = reinterpret_cast<void**>(aligned) - 1;
+            *header = raw;
+
+            return aligned;
+        }
+
+        void deallocate(std::byte* p, size_t n)
+        {
+            // Retrieve original pointer from header
+            auto* header = reinterpret_cast<void**>(p) - 1;
+            auto* raw = static_cast<AlignedByte<Alignment>*>(*header);
+
+            size_t extra = Alignment - 1 + sizeof(void*);
+            size_t totalUnits = (n + extra + sizeof(AlignedByte<Alignment>) - 1) /
+                                sizeof(AlignedByte<Alignment>);
+            InnerAllocTraits::deallocate(inner_, raw, totalUnits);
+        }
+
+        // Propagation traits: forward from inner allocator
+        using propagate_on_container_copy_assignment =
+            typename InnerAllocTraits::propagate_on_container_copy_assignment;
+        using propagate_on_container_move_assignment =
+            typename InnerAllocTraits::propagate_on_container_move_assignment;
+        using propagate_on_container_swap =
+            typename InnerAllocTraits::propagate_on_container_swap;
+        using is_always_equal = typename InnerAllocTraits::is_always_equal;
+
+        AlignedAllocatorAdapter select_on_container_copy_construction() const
+        {
+            return AlignedAllocatorAdapter {
+                InnerAllocTraits::select_on_container_copy_construction(inner_)};
+        }
+
+        bool operator==(AlignedAllocatorAdapter const& other) const = default;
+    };
+
+    /// Helper for computing co-located memory layout.
+    /// Memory layout: [ctrl bytes][padding][slots...]
+    template<typename T, size_t GroupSize>
+    struct TableLayout
+    {
+        static constexpr size_t ctrlAlignment = GroupSize;
+        static constexpr size_t slotAlignment = alignof(Slot<T>);
+
+        /// Computes the offset from buffer start to the slots array.
+        static constexpr size_t slotsOffset(size_t ctrlLen)
+        {
+            size_t ctrlSize = ctrlLen * sizeof(ctrl_t);
+            // Round up to slot alignment
+            return (ctrlSize + slotAlignment - 1) & ~(slotAlignment - 1);
+        }
+
+        /// Computes total buffer size for given control length and capacity.
+        static constexpr size_t bufferSize(size_t ctrlLen, size_t capacity)
+        {
+            return slotsOffset(ctrlLen) + capacity * sizeof(Slot<T>);
+        }
+
+        /// Maximum alignment requirement for the buffer.
+        static constexpr size_t bufferAlignment() { return std::max(ctrlAlignment, slotAlignment); }
+    };
+
     /// A group of control bytes, the fundamental unit of Swiss Table probing.
     /// Uses SIMD instructions for fast parallel matching.
     template<SimdBackend Backend>
@@ -146,7 +251,8 @@ namespace alp
     };
 
     /// Forward declaration of the Table base class.
-    export template<typename T, typename Hash, typename Equal, typename Policy, SimdBackend Backend>
+    export template<typename T, typename Hash, typename Equal, typename Policy, SimdBackend Backend,
+                    typename Allocator>
     class Table;
 
     /// Iterator for traversing elements in a Swiss Table.
@@ -280,7 +386,8 @@ namespace alp
             }
         }
 
-        template<typename U, typename Hash, typename Equal, typename Policy, SimdBackend B>
+        template<typename U, typename Hash, typename Equal, typename Policy, SimdBackend B,
+                 typename Allocator>
         friend class Table;
     };
 
@@ -288,10 +395,18 @@ namespace alp
     /// 7/8 = 0.875 provides a good balance between memory usage and probe length.
     constexpr auto MAX_LOAD_FACTOR = 0.875;
 
+    /// Concept: allocator that can be safely swapped without causing UB.
+    /// Swap is safe if allocators propagate on swap or are always equal.
+    template<typename Alloc>
+    concept SafeSwappableAllocator =
+        std::allocator_traits<Alloc>::propagate_on_container_swap::value ||
+        std::allocator_traits<Alloc>::is_always_equal::value;
+
     /// Base class for Swiss Table hash containers.
     /// Implements the core Swiss Table algorithm with SIMD-accelerated probing.
     /// Uses open addressing with linear probing and a control byte array.
-    template<typename T, typename Hash, typename Equal, typename Policy, SimdBackend Backend>
+    template<typename T, typename Hash, typename Equal, typename Policy, SimdBackend Backend,
+             typename Allocator = std::allocator<std::byte>>
     class Table
     {
       protected:
@@ -303,9 +418,31 @@ namespace alp
         using iterator = SetIterator<T, Backend>;
         using const_iterator = SetIterator<T const, Backend>;
 
-        Table() = default;
+        using allocator_type = Allocator;
+        using AllocTraits = std::allocator_traits<Allocator>;
+        using AlignedByteType = AlignedByte<LANE_COUNT>;
+        using InnerAlloc = typename AllocTraits::template rebind_alloc<AlignedByteType>;
+        using ByteAlloc = AlignedAllocatorAdapter<InnerAlloc, LANE_COUNT>;
+        using ByteAllocTraits = std::allocator_traits<ByteAlloc>;
 
-        explicit Table(size_type capacity) { reserve(capacity); }
+        Table()
+            : alloc_()
+            , byte_alloc_(alloc_)
+        {
+        }
+
+        explicit Table(Allocator const& alloc)
+            : alloc_(alloc)
+            , byte_alloc_(alloc_)
+        {
+        }
+
+        explicit Table(size_type capacity, Allocator const& alloc = Allocator())
+            : alloc_(alloc)
+            , byte_alloc_(alloc_)
+        {
+            reserve(capacity);
+        }
 
         Table(Table const& other)
             requires std::copy_constructible<T>
@@ -314,15 +451,20 @@ namespace alp
             , capacity_(other.capacity_)
             , ctrlLen_(other.ctrlLen_)
             , groups_(other.groups_)
-            , slots_(other.capacity_ > 0 ? new Slot<T>[other.capacity_] : nullptr)
+            , alloc_(AllocTraits::select_on_container_copy_construction(other.alloc_))
+            , byte_alloc_(alloc_)
         {
-            if (other.ctrl_ == nullptr)
+            if (other.buffer_ == nullptr)
             {
                 return;
             }
-            size_t allocSize = LANE_COUNT * groups_;
-            ctrl_ = allocate(allocSize);
-            std::memset(ctrl_, static_cast<ctrl_t>(Ctrl::Empty), allocSize * sizeof(ctrl_t));
+
+            // Allocate co-located buffer
+            buffer_ = allocateBuffer(ctrlLen_, capacity_);
+            ctrl_ = reinterpret_cast<ctrl_t*>(buffer_);
+            slots_ = reinterpret_cast<Slot<T>*>(buffer_ + Layout::slotsOffset(ctrlLen_));
+
+            std::memset(ctrl_, static_cast<ctrl_t>(Ctrl::Empty), ctrlLen_ * sizeof(ctrl_t));
 
             if (capacity_ > 0)
             {
@@ -331,7 +473,7 @@ namespace alp
                     for (auto it = other.begin(); it != other.end(); ++it)
                     {
                         size_t offset = it.ctrl - other.ctrl_;
-                        std::construct_at(slots_[offset].element(), *it);
+                        AllocTraits::construct(alloc_, slots_[offset].element(), *it);
 
                         ctrl_[offset] = other.ctrl_[offset];
                     }
@@ -344,10 +486,10 @@ namespace alp
                     {
                         if ((ctrl_[i] & 0x80) == 0)  // isFull check
                         {
-                            slots_[i].element()->~T();
+                            AllocTraits::destroy(alloc_, slots_[i].element());
                         }
                     }
-                    std::free(ctrl_);
+                    deallocateBuffer(buffer_, ctrlLen_, capacity_);
                     throw;
                 }
             }
@@ -405,27 +547,29 @@ namespace alp
 
         void clear() noexcept
         {
-            if (ctrl_ != nullptr)
+            if (buffer_ != nullptr)
             {
                 for (size_t i = 0; i < capacity_; ++i)
                 {
                     if ((ctrl_[i] & 0x80) == 0)
                     {
-                        slots_[i].element()->~T();
+                        AllocTraits::destroy(alloc_, slots_[i].element());
                     }
                 }
-                std::free(ctrl_);
+                deallocateBuffer(buffer_, ctrlLen_, capacity_);
             }
 
             size_ = 0;
             used_ = 0;
             capacity_ = 0;
             ctrlLen_ = 0;
-            slots_.reset();
+            buffer_ = nullptr;
             ctrl_ = nullptr;
+            slots_ = nullptr;
         }
 
         void swap(Table& other) noexcept
+            requires SafeSwappableAllocator<Allocator>
         {
             using std::swap;
             swap(size_, other.size_);
@@ -433,8 +577,14 @@ namespace alp
             swap(capacity_, other.capacity_);
             swap(ctrlLen_, other.ctrlLen_);
             swap(groups_, other.groups_);
-            swap(slots_, other.slots_);
+            if constexpr (AllocTraits::propagate_on_container_swap::value)
+            {
+                swap(alloc_, other.alloc_);
+                swap(byte_alloc_, other.byte_alloc_);
+            }
+            swap(buffer_, other.buffer_);
             swap(ctrl_, other.ctrl_);
+            swap(slots_, other.slots_);
         }
 
       protected:
@@ -514,7 +664,7 @@ namespace alp
                     size_t idx = baseSlot + offset;
 
                     ctrl_[idx] = h2Val;
-                    std::construct_at(slots_[idx].element(), std::move(value));
+                    AllocTraits::construct(alloc_, slots_[idx].element(), std::move(value));
                     size_++;
 
                     return {idx, true};
@@ -567,7 +717,7 @@ namespace alp
         /// Marks the slot as deleted or empty based on group state.
         void erase_slot(size_t offset)
         {
-            slots_[offset].element()->~T();
+            AllocTraits::destroy(alloc_, slots_[offset].element());
             --size_;
 
             auto addr = reinterpret_cast<uintptr_t>(ctrl_ + offset);
@@ -590,19 +740,24 @@ namespace alp
         /// Extracts the lower 7 bits for control byte matching.
         static constexpr ctrl_t h2(size_t hash) { return Policy::apply(hash) & 0x7F; }
 
-        iterator iteratorAt(size_t offset) { return {ctrl_ + offset, slots_.get() + offset}; }
+        iterator iteratorAt(size_t offset) { return {ctrl_ + offset, slots_ + offset}; }
         const_iterator iteratorAt(size_t offset) const
         {
-            return iterator {(ctrl_ + offset), const_cast<Slot<T>*>(slots_.get() + offset)};
+            return iterator {(ctrl_ + offset), const_cast<Slot<T>*>(slots_ + offset)};
         }
+
+        using Layout = TableLayout<T, LANE_COUNT>;
 
         size_t size_ = 0;
         size_t used_ = 0;
         size_t capacity_ = 0;
         size_t ctrlLen_ = 0;
         size_t groups_ = 0;
-        std::unique_ptr<Slot<T>[]> slots_;
-        ctrl_t* ctrl_ = nullptr;
+        [[no_unique_address]] Allocator alloc_;
+        [[no_unique_address]] ByteAlloc byte_alloc_;  // Rebound allocator for buffer
+        std::byte* buffer_ = nullptr;  // Single co-located allocation
+        ctrl_t* ctrl_ = nullptr;  // Points into buffer_
+        Slot<T>* slots_ = nullptr;  // Points into buffer_ after ctrl
 
       private:
         /// Finds the smallest n such that 16 * n >= count + 1
@@ -617,9 +772,12 @@ namespace alp
         {
             auto count = LANE_COUNT * newGroupCount;
             auto newCapacity = count - 1;
-            auto* newCtrl = allocate(count);
 
-            std::unique_ptr<Slot<T>[]> newSlots(new Slot<T>[newCapacity]);
+            // Allocate new co-located buffer
+            auto* newBuffer = allocateBuffer(count, newCapacity);
+            auto* newCtrl = reinterpret_cast<ctrl_t*>(newBuffer);
+            auto* newSlots = reinterpret_cast<Slot<T>*>(newBuffer + Layout::slotsOffset(count));
+
             std::memset(newCtrl, static_cast<ctrl_t>(Ctrl::Empty), newCapacity);
             newCtrl[newCapacity] = static_cast<ctrl_t>(Ctrl::Sentinel);
 
@@ -648,9 +806,9 @@ namespace alp
                         else
                         {
                             // Standard path: move construct and destroy
-                            std::construct_at(newSlots[idx].element(),
+                            AllocTraits::construct(alloc_, newSlots[idx].element(),
                                               std::move(*oldSlot.element()));
-                            oldSlot.element()->~T();
+                            AllocTraits::destroy(alloc_, oldSlot.element());
                         }
                         newCtrl[idx] = h2Val;
                         return;
@@ -680,20 +838,32 @@ namespace alp
                     }
                 }
 
-                std::free(ctrl_);
+                deallocateBuffer(buffer_, ctrlLen_, capacity_);
             }
 
+            buffer_ = newBuffer;
             ctrl_ = newCtrl;
-            slots_ = std::move(newSlots);
+            slots_ = newSlots;
             ctrlLen_ = count;
             capacity_ = newCapacity;
             groups_ = newGroupCount;
         }
 
-        static ctrl_t* allocate(size_t count)
+        /// Allocates a combined buffer for ctrl + slots using the allocator.
+        std::byte* allocateBuffer(size_t ctrlLen, size_t capacity)
         {
-            constexpr size_t alignment = Backend::GroupSize;
-            return static_cast<ctrl_t*>(std::aligned_alloc(alignment, sizeof(ctrl_t) * count));
+            auto size = Layout::bufferSize(ctrlLen, capacity);
+            return ByteAllocTraits::allocate(byte_alloc_, size);
+        }
+
+        /// Deallocates the combined buffer.
+        void deallocateBuffer(std::byte* buffer, size_t ctrlLen, size_t capacity)
+        {
+            if (buffer)
+            {
+                auto size = Layout::bufferSize(ctrlLen, capacity);
+                ByteAllocTraits::deallocate(byte_alloc_, buffer, size);
+            }
         }
     };
 
@@ -703,11 +873,12 @@ namespace alp
                     typename Hash = std::hash<std::remove_cvref_t<T>>,
                     typename Equal = std::equal_to<T>,
                     typename Policy = MixHashPolicy,
-                    SimdBackend Backend = DefaultBackend>
+                    SimdBackend Backend = DefaultBackend,
+                    typename Allocator = std::allocator<std::byte>>
         requires std::move_constructible<T>
-    class Set : Table<T, Hash, Equal, Policy, Backend>
+    class Set : Table<T, Hash, Equal, Policy, Backend, Allocator>
     {
-        using Base = Table<T, Hash, Equal, Policy, Backend>;
+        using Base = Table<T, Hash, Equal, Policy, Backend, Allocator>;
 
       public:
         using value_type = T;
@@ -730,9 +901,17 @@ namespace alp
         using Base::size;
         using Base::swap;
 
+        using allocator_type = typename Base::allocator_type;
+
         Set() = default;
-        explicit Set(size_type capacity)
-            : Base(capacity)
+
+        explicit Set(Allocator const& alloc)
+            : Base(alloc)
+        {
+        }
+
+        explicit Set(size_type capacity, Allocator const& alloc = Allocator())
+            : Base(capacity, alloc)
         {
         }
 
