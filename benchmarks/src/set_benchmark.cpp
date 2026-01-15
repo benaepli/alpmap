@@ -188,7 +188,7 @@ namespace
         auto registerWithRange = [&](std::string testName, auto func)
         {
             benchmark::RegisterBenchmark((suiteName + "/" + testName).c_str(), func)
-                ->Range(8, 1 << 17);
+                ->Range(8, 1 << 22);
         };
 
         registerWithRange("Insert", bmInsert<Container>);
