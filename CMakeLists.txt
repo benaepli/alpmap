@@ -30,9 +30,7 @@ if (ALP_USE_EVE)
 endif ()
 
 
-add_library(alpmap
-        src/backends/eve.hpp
-        src/backends/sse.hpp)
+add_library(alpmap)
 
 if (ALP_USE_EVE)
     target_compile_definitions(alpmap PRIVATE ALP_USE_EVE)
@@ -46,6 +44,8 @@ target_sources(alpmap
         src/alp-map.cppm
         src/alp-set.cppm
         src/backends/std_simd.cppm
+        src/backends/eve.cppm
+        src/backends/sse.cppm
 )
 
 target_compile_features(alpmap PUBLIC cxx_std_23)

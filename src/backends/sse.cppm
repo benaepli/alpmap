@@ -1,4 +1,4 @@
-#pragma once
+module;
 
 #include <bit>
 #include <cstdint>
@@ -6,9 +6,11 @@
 
 #include <emmintrin.h>
 
+export module alp:backend_sse;
+
 namespace alp
 {
-    struct SseBackend
+    export struct SseBackend
     {
         static constexpr std::size_t GroupSize = 16;
 

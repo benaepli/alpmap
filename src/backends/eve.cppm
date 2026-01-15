@@ -1,4 +1,4 @@
-#pragma once
+module;
 
 #include <algorithm>
 #include <cstdint>
@@ -6,11 +6,13 @@
 
 #include <eve/eve.hpp>
 
+export module alp:backend_eve;
+
 namespace alp
 {
     /// SIMD backend implementation using the EVE library.
     /// Provides zero-cost abstraction over EVE SIMD operations.
-    struct EveBackend
+    export struct EveBackend
     {
         // Determine lane count (capped at 64 to fit in uint64_t bitmask)
         static constexpr std::size_t max_size = 64;

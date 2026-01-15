@@ -7,16 +7,17 @@ module;
 #include <expected>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <tuple>
 #include <utility>
 #include <vector>
 
-#if defined(ALP_USE_EVE)
-#    include "backends/eve.hpp"
-#endif
-#include "backends/sse.hpp"
-
 export module alp:set;
+
+#if defined(ALP_USE_EVE)
+import :backend_eve;
+#endif
+import :backend_sse;
 
 namespace alp
 {
@@ -43,11 +44,10 @@ namespace alp
 
         { B::iterate(typename B::Mask {}) } -> std::same_as<typename B::Iterable>;
         // Get the next set bit for some offset greater than zero
-        { B::nextTrue(typename B::Mask {}, size_t {}) } -> std::convertible_to<std::optional<int>>;    };
+        { B::nextTrue(typename B::Mask {}, size_t {}) } -> std::convertible_to<std::optional<int>>;
+    };
 
 #if defined(ALP_USE_EVE)
-    export using alp::EveBackend;
-
     using DefaultBackend = EveBackend;
 #else
     using DefaultBackend = SseBackend;
