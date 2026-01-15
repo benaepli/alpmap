@@ -20,6 +20,7 @@ export module alp:set;
 import :backend_eve;
 #endif
 import :backend_sse;
+import :rapid_hash;
 
 namespace alp
 {
@@ -246,29 +247,6 @@ namespace alp
 
         /// Returns true if and only if there exists a slot that isn't empty, deleted, or sentinel.
         bool hasValue() const { return Backend::any(matchFull()); }
-    };
-
-    /// A hash policy that mixes bits to protect against poor std::hash implementations.
-    /// Uses MurmurHash3's 64-bit finalizer for high-quality bit distribution.
-    export struct MixHashPolicy
-    {
-        static constexpr size_t apply(size_t h)
-        {
-            // MurmurHash3 64-bit finalizer
-            h ^= h >> 33;
-            h *= 0xff51afd7ed558ccdULL;
-            h ^= h >> 33;
-            h *= 0xc4ceb9fe1a85ec53ULL;
-            h ^= h >> 33;
-            return h;
-        }
-    };
-
-    /// A hash policy for when the user provides a high-quality hash.
-    /// Skips the mixing step for maximum performance.
-    export struct IdentityHashPolicy
-    {
-        static constexpr size_t apply(size_t h) { return h; }
     };
 
     // Export hash storage policy tags
@@ -943,7 +921,7 @@ namespace alp
     export template<typename T,
                     typename Hash = std::hash<std::remove_cvref_t<T>>,
                     typename Equal = std::equal_to<T>,
-                    typename Policy = MixHashPolicy,
+                    typename Policy = HashPolicySelector<T, Hash>::type,
                     SimdBackend Backend = DefaultBackend,
                     typename Allocator = std::allocator<std::byte>,
                     typename LoadFactorRatio = DEFAULT_LOAD_FACTOR,

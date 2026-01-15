@@ -2,6 +2,7 @@ export module alp;
 
 export import :set;
 export import :map;
+export import :rapid_hash;
 
 // Export backend interface partitions
 export import :backend_sse;

@@ -29,6 +29,9 @@ if (ALP_USE_EVE)
     FetchContent_MakeAvailable(eve)
 endif ()
 
+add_subdirectory(deps/rapidhash)
+
+
 
 add_library(alpmap)
 
@@ -39,6 +42,7 @@ target_sources(alpmap
         src/alp-map.cppm
         src/alp-set.cppm
         src/backends/sse.cppm
+        src/hashing/rapid.cppm
 )
 
 
@@ -51,6 +55,8 @@ if (ALP_USE_EVE)
             src/backends/eve.cppm
     )
 endif ()
+
+target_link_libraries(alpmap PRIVATE rapidhash)
 
 if (ALP_USE_EXPERIMENTAL_SIMD)
     target_compile_definitions(alpmap PRIVATE ALP_USE_EXPERIMENTAL_SIMD)
