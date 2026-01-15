@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <random>
+#include <ratio>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -206,6 +207,67 @@ int main(int argc, char** argv)
 
     registerSuite<std::unordered_set<int64_t>>("Std_Int64");
     registerSuite<std::unordered_set<std::string>>("Std_String");
+
+    using StringStoreHash_LF75 = alp::Set<std::string,
+                                          std::hash<std::string>,
+                                          std::equal_to<std::string>,
+                                          alp::MixHashPolicy,
+                                          alp::DefaultBackend,
+                                          std::allocator<std::byte>,
+                                          std::ratio<3, 4>,
+                                          alp::StoreHashTag>;
+
+    using StringStoreHash_LF85 = alp::Set<std::string,
+                                          std::hash<std::string>,
+                                          std::equal_to<std::string>,
+                                          alp::MixHashPolicy,
+                                          alp::DefaultBackend,
+                                          std::allocator<std::byte>,
+                                          std::ratio<17, 20>,
+                                          alp::StoreHashTag>;
+
+    using StringStoreHash_LF90 = alp::Set<std::string,
+                                          std::hash<std::string>,
+                                          std::equal_to<std::string>,
+                                          alp::MixHashPolicy,
+                                          alp::DefaultBackend,
+                                          std::allocator<std::byte>,
+                                          std::ratio<9, 10>,
+                                          alp::StoreHashTag>;
+
+    using StringNoStoreHash_LF75 = alp::Set<std::string,
+                                            std::hash<std::string>,
+                                            std::equal_to<std::string>,
+                                            alp::MixHashPolicy,
+                                            alp::DefaultBackend,
+                                            std::allocator<std::byte>,
+                                            std::ratio<3, 4>,
+                                            alp::NoStoreHashTag>;
+
+    using StringNoStoreHash_LF85 = alp::Set<std::string,
+                                            std::hash<std::string>,
+                                            std::equal_to<std::string>,
+                                            alp::MixHashPolicy,
+                                            alp::DefaultBackend,
+                                            std::allocator<std::byte>,
+                                            std::ratio<17, 20>,
+                                            alp::NoStoreHashTag>;
+
+    using StringNoStoreHash_LF90 = alp::Set<std::string,
+                                            std::hash<std::string>,
+                                            std::equal_to<std::string>,
+                                            alp::MixHashPolicy,
+                                            alp::DefaultBackend,
+                                            std::allocator<std::byte>,
+                                            std::ratio<9, 10>,
+                                            alp::NoStoreHashTag>;
+    registerSuite<StringStoreHash_LF75>("Alp_String_StoreHash_LF75");
+    registerSuite<StringStoreHash_LF85>("Alp_String_StoreHash_LF85");
+    registerSuite<StringStoreHash_LF90>("Alp_String_StoreHash_LF90");
+
+    registerSuite<StringNoStoreHash_LF75>("Alp_String_NoStoreHash_LF75");
+    registerSuite<StringNoStoreHash_LF85>("Alp_String_NoStoreHash_LF85");
+    registerSuite<StringNoStoreHash_LF90>("Alp_String_NoStoreHash_LF90");
 
     using AlpIdentityInt =
         alp::Set<int64_t, std::hash<int64_t>, std::equal_to<int64_t>, alp::IdentityHashPolicy>;

@@ -50,9 +50,9 @@ namespace alp
     };
 
 #if defined(ALP_USE_EVE)
-    using DefaultBackend = EveBackend;
+    export using DefaultBackend = EveBackend;
 #else
-    using DefaultBackend = SseBackend;
+    export using DefaultBackend = SseBackend;
 #endif
 
     using ctrl_t = uint8_t;
@@ -71,14 +71,34 @@ namespace alp
         Sentinel = 0b11111111,
     };
 
+    struct StoreHashTag
+    {
+    };
+    struct NoStoreHashTag
+    {
+    };
+
+    using DefaultHashStoragePolicy = NoStoreHashTag;
+
     /// A slot stores an element of type T using aligned raw storage.
     /// This allows us to manually control construction and destruction.
-    /// Also stores the full hash to avoid recomputation during rehash.
-    template<typename T>
+    /// Primary template: stores the full hash to avoid recomputation during rehash.
+    template<typename T, typename HashStoragePolicy = StoreHashTag>
     struct Slot
     {
         alignas(T) uint8_t storage[sizeof(T)];
         size_t hash;  // Cached hash for fast rehashing
+
+        T* element() { return reinterpret_cast<T*>(storage); }
+        T const* element() const { return reinterpret_cast<T const*>(storage); }
+    };
+
+    /// Specialization: without hash storage (memory-saving mode)
+    template<typename T>
+    struct Slot<T, NoStoreHashTag>
+    {
+        alignas(T) uint8_t storage[sizeof(T)];
+        // No hash field - saves sizeof(size_t) per slot
 
         T* element() { return reinterpret_cast<T*>(storage); }
         T const* element() const { return reinterpret_cast<T const*>(storage); }
@@ -162,11 +182,11 @@ namespace alp
 
     /// Helper for computing co-located memory layout.
     /// Memory layout: [ctrl bytes][padding][slots...]
-    template<typename T, size_t GroupSize>
+    template<typename T, size_t GroupSize, typename HashStoragePolicy = StoreHashTag>
     struct TableLayout
     {
         static constexpr size_t ctrlAlignment = GroupSize;
-        static constexpr size_t slotAlignment = alignof(Slot<T>);
+        static constexpr size_t slotAlignment = alignof(Slot<T, HashStoragePolicy>);
 
         /// Computes the offset from buffer start to the slots array.
         static constexpr size_t slotsOffset(size_t ctrlLen)
@@ -179,7 +199,7 @@ namespace alp
         /// Computes total buffer size for given control length and capacity.
         static constexpr size_t bufferSize(size_t ctrlLen, size_t capacity)
         {
-            return slotsOffset(ctrlLen) + capacity * sizeof(Slot<T>);
+            return slotsOffset(ctrlLen) + capacity * sizeof(Slot<T, HashStoragePolicy>);
         }
 
         /// Maximum alignment requirement for the buffer.
@@ -251,6 +271,11 @@ namespace alp
         static constexpr size_t apply(size_t h) { return h; }
     };
 
+    // Export hash storage policy tags
+    export using StoreHashTag = StoreHashTag;
+    export using NoStoreHashTag = NoStoreHashTag;
+    export using DefaultHashStoragePolicy = DefaultHashStoragePolicy;
+
     /// Forward declaration of the Table base class.
     export template<typename T,
                     typename Hash,
@@ -258,35 +283,36 @@ namespace alp
                     typename Policy,
                     SimdBackend Backend,
                     typename Allocator,
-                    typename LoadFactorRatio>
+                    typename LoadFactorRatio,
+                    typename HashStoragePolicy>
     class Table;
 
     /// Iterator for traversing elements in a Swiss Table.
     /// Uses the control byte array to efficiently skip empty/deleted slots.
-    export template<typename T, SimdBackend Backend>
+    export template<typename T, SimdBackend Backend, typename HashStoragePolicy = StoreHashTag>
     struct SetIterator
     {
         static constexpr size_t LANE_COUNT = Backend::GroupSize;
 
-        template<typename U, SimdBackend B>
+        template<typename U, SimdBackend B, typename HSP>
         friend struct SetIterator;
 
         /// Pointer to the current control byte.
         ctrl_t const* ctrl;
         /// Pointer to the current slot.
-        Slot<T>* slot;
+        Slot<std::remove_const_t<T>, HashStoragePolicy>* slot;
 
-        SetIterator(ctrl_t const* c, Slot<T>* s)
+        SetIterator(ctrl_t const* c, Slot<std::remove_const_t<T>, HashStoragePolicy>* s)
             : ctrl(c)
             , slot(s)
         {
         }
 
         // Converting constructor: allows iterator to convert to const_iterator
-        SetIterator(SetIterator<std::remove_const_t<T>, Backend> const& other)
+        SetIterator(SetIterator<std::remove_const_t<T>, Backend, HashStoragePolicy> const& other)
             requires std::is_const_v<T> && (!std::is_same_v<T, std::remove_const_t<T>>)
             : ctrl(other.ctrl)
-            , slot(reinterpret_cast<Slot<T>*>(other.slot))
+            , slot(reinterpret_cast<Slot<std::remove_const_t<T>, HashStoragePolicy>*>(other.slot))
         {
         }
 
@@ -295,8 +321,8 @@ namespace alp
 
         // Update comparison to work across iterator/const_iterator
         template<typename U>
-        friend bool operator==(SetIterator<T, Backend> const& lhs,
-                               SetIterator<U, Backend> const& rhs)
+        friend bool operator==(SetIterator<T, Backend, HashStoragePolicy> const& lhs,
+                               SetIterator<U, Backend, HashStoragePolicy> const& rhs)
         {
             return lhs.ctrl == rhs.ctrl;
         }
@@ -398,7 +424,8 @@ namespace alp
                  typename Policy,
                  SimdBackend B,
                  typename Allocator,
-                 typename LoadFactorRatio>
+                 typename LoadFactorRatio,
+                 typename H>
         friend class Table;
     };
 
@@ -422,7 +449,8 @@ namespace alp
              typename Policy,
              SimdBackend Backend,
              typename Allocator = std::allocator<std::byte>,
-             typename LoadFactorRatio = DEFAULT_LOAD_FACTOR>
+             typename LoadFactorRatio = DEFAULT_LOAD_FACTOR,
+             typename HashStoragePolicy = DefaultHashStoragePolicy>
     class Table
     {
       protected:
@@ -433,8 +461,8 @@ namespace alp
         using value_type = T;
         using size_type = std::size_t;
         using difference_type = std::ptrdiff_t;
-        using iterator = SetIterator<T, Backend>;
-        using const_iterator = SetIterator<T const, Backend>;
+        using iterator = SetIterator<T, Backend, HashStoragePolicy>;
+        using const_iterator = SetIterator<T const, Backend, HashStoragePolicy>;
 
         using allocator_type = Allocator;
         using AllocTraits = std::allocator_traits<Allocator>;
@@ -480,7 +508,8 @@ namespace alp
             // Allocate co-located buffer
             buffer_ = allocateBuffer(ctrlLen_, capacity_);
             ctrl_ = reinterpret_cast<ctrl_t*>(buffer_);
-            slots_ = reinterpret_cast<Slot<T>*>(buffer_ + Layout::slotsOffset(ctrlLen_));
+            slots_ = reinterpret_cast<Slot<T, HashStoragePolicy>*>(buffer_
+                                                                   + Layout::slotsOffset(ctrlLen_));
 
             std::memset(ctrl_, static_cast<ctrl_t>(Ctrl::Empty), ctrlLen_ * sizeof(ctrl_t));
 
@@ -684,7 +713,8 @@ namespace alp
                     size_t idx = baseSlot + offset;
 
                     ctrl_[idx] = h2Val;
-                    slots_[idx].hash = hash;  // Store full hash for fast rehashing
+                    setSlotHash(slots_[idx],
+                                hash);  // Store full hash for fast rehashing if policy requires
                     AllocTraits::construct(alloc_, slots_[idx].element(), std::move(value));
                     size_++;
 
@@ -757,13 +787,37 @@ namespace alp
         /// Extracts the lower 7 bits for control byte matching.
         static constexpr ctrl_t h2(size_t hash) { return hash & 0x7F; }
 
+        /// Get hash value (stored or recomputed)
+        [[nodiscard]] size_t getSlotHash(Slot<T, HashStoragePolicy> const& slot) const
+        {
+            if constexpr (std::is_same_v<HashStoragePolicy, StoreHashTag>)
+            {
+                return slot.hash;
+            }
+            else
+            {
+                return Policy::apply(Hash {}(*slot.element()));
+            }
+        }
+
+        /// Store hash if policy requires
+        void setSlotHash(Slot<T, HashStoragePolicy>& slot, size_t hash)
+        {
+            if constexpr (std::is_same_v<HashStoragePolicy, StoreHashTag>)
+            {
+                slot.hash = hash;
+            }
+            // NoStoreHashTag: no-op, optimized away by compiler
+        }
+
         iterator iteratorAt(size_t offset) { return {ctrl_ + offset, slots_ + offset}; }
         const_iterator iteratorAt(size_t offset) const
         {
-            return iterator {(ctrl_ + offset), const_cast<Slot<T>*>(slots_ + offset)};
+            return iterator {(ctrl_ + offset),
+                             const_cast<Slot<T, HashStoragePolicy>*>(slots_ + offset)};
         }
 
-        using Layout = TableLayout<T, LANE_COUNT>;
+        using Layout = TableLayout<T, LANE_COUNT, HashStoragePolicy>;
 
         size_t size_ = 0;
         size_t used_ = 0;
@@ -774,7 +828,7 @@ namespace alp
         [[no_unique_address]] ByteAlloc byte_alloc_;  // Rebound allocator for buffer
         std::byte* buffer_ = nullptr;  // Single co-located allocation
         ctrl_t* ctrl_ = nullptr;  // Points into buffer_
-        Slot<T>* slots_ = nullptr;  // Points into buffer_ after ctrl
+        Slot<T, HashStoragePolicy>* slots_ = nullptr;  // Points into buffer_ after ctrl
 
       private:
         /// Finds the smallest n such that 16 * n >= count + 1
@@ -793,17 +847,20 @@ namespace alp
             // Allocate new co-located buffer
             auto* newBuffer = allocateBuffer(count, newCapacity);
             auto* newCtrl = reinterpret_cast<ctrl_t*>(newBuffer);
-            auto* newSlots = reinterpret_cast<Slot<T>*>(newBuffer + Layout::slotsOffset(count));
+            auto* newSlots = reinterpret_cast<Slot<T, HashStoragePolicy>*>(
+                newBuffer + Layout::slotsOffset(count));
 
             std::memset(newCtrl, static_cast<ctrl_t>(Ctrl::Empty), newCapacity);
             newCtrl[newCapacity] = static_cast<ctrl_t>(Ctrl::Sentinel);
 
             size_t mask = newGroupCount - 1;
 
-            auto insertUnchecked = [&](Slot<T>& oldSlot)
+            auto insertUnchecked = [&](Slot<T, HashStoragePolicy>& oldSlot)
             {
-                auto h1Val = h1(oldSlot.hash);
-                auto h2Val = h2(oldSlot.hash);
+                // Get hash (stored or recomputed)
+                size_t fullHash = getSlotHash(oldSlot);
+                auto h1Val = h1(fullHash);
+                auto h2Val = h2(fullHash);
                 size_t group = h1Val & mask;
 
                 while (true)
@@ -829,7 +886,7 @@ namespace alp
                                 alloc_, newSlots[idx].element(), std::move(*oldSlot.element()));
                             AllocTraits::destroy(alloc_, oldSlot.element());
                         }
-                        newSlots[idx].hash = oldSlot.hash;  // Copy cached hash
+                        setSlotHash(newSlots[idx], fullHash);  // Store hash if policy requires
                         newCtrl[idx] = h2Val;
                         return;
                     }
@@ -889,11 +946,14 @@ namespace alp
                     typename Policy = MixHashPolicy,
                     SimdBackend Backend = DefaultBackend,
                     typename Allocator = std::allocator<std::byte>,
-                    typename LoadFactorRatio = DEFAULT_LOAD_FACTOR>
+                    typename LoadFactorRatio = DEFAULT_LOAD_FACTOR,
+                    typename HashStoragePolicy = DefaultHashStoragePolicy>
         requires std::move_constructible<T>
-    class Set : Table<T, Hash, Equal, Policy, Backend, Allocator, LoadFactorRatio>
+    class Set
+        : Table<T, Hash, Equal, Policy, Backend, Allocator, LoadFactorRatio, HashStoragePolicy>
     {
-        using Base = Table<T, Hash, Equal, Policy, Backend, Allocator, LoadFactorRatio>;
+        using Base =
+            Table<T, Hash, Equal, Policy, Backend, Allocator, LoadFactorRatio, HashStoragePolicy>;
 
       public:
         using value_type = T;
@@ -906,8 +966,8 @@ namespace alp
         using pointer = value_type*;
         using const_pointer = value_type const*;
 
-        using iterator = SetIterator<T const, Backend>;
-        using const_iterator = SetIterator<T const, Backend>;
+        using iterator = SetIterator<T const, Backend, HashStoragePolicy>;
+        using const_iterator = SetIterator<T const, Backend, HashStoragePolicy>;
 
         using Base::Base;
         using Base::clear;

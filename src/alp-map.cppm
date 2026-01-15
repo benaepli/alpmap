@@ -75,7 +75,8 @@ namespace alp
                     typename Policy = MixHashPolicy,
                     SimdBackend Backend = DefaultBackend,
                     typename Allocator = std::allocator<std::byte>,
-                    typename LoadFactorRatio = DEFAULT_LOAD_FACTOR>
+                    typename LoadFactorRatio = DEFAULT_LOAD_FACTOR,
+                    typename HashStoragePolicy = DefaultHashStoragePolicy>
         requires std::move_constructible<std::pair<Key const, Value>>
     class Map
         : Table<std::pair<Key const, Value>,
@@ -84,7 +85,8 @@ namespace alp
                 Policy,
                 Backend,
                 Allocator,
-                LoadFactorRatio>
+                LoadFactorRatio,
+                HashStoragePolicy>
     {
         using PairType = std::pair<Key const, Value>;
         using Base = Table<PairType,
@@ -93,7 +95,8 @@ namespace alp
                            Policy,
                            Backend,
                            Allocator,
-                           LoadFactorRatio>;
+                           LoadFactorRatio,
+                           HashStoragePolicy>;
 
       public:
         using key_type = Key;
