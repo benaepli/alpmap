@@ -28,6 +28,26 @@ namespace alp
         using Mask = ctrl_mask;
         using BitMask = std::uint64_t;
 
+        struct Iterable
+        {
+            BitMask bits;
+
+            struct Iterator
+            {
+                BitMask bits;
+                int operator*() const { return std::countr_zero(bits); }
+                Iterator& operator++()
+                {
+                    bits &= (bits - 1);
+                    return *this;
+                }
+                bool operator!=(Iterator const& other) const { return bits != other.bits; }
+            };
+
+            Iterator begin() const { return {bits}; }
+            Iterator end() const { return {0}; }
+        };
+
         /// Load control bytes from memory into a SIMD register.
         static Register load(std::uint8_t const* ptr) { return Register {ptr}; }
 
@@ -52,6 +72,18 @@ namespace alp
         static std::optional<int> firstTrue(Mask mask) { return eve::first_true(mask); }
 
         /// Convert a SIMD mask to a scalar bitmask for iteration.
-        static BitMask toBits(Mask mask) { return eve::top_bits {mask}.as_int(); }
+        static Iterable iterate(Mask mask) { return Iterable {eve::top_bits {mask}.as_int()}; }
+
+        static std::optional<int> nextTrue(Mask mask, size_t nextIndex)
+        {
+            BitMask bits = eve::top_bits {mask}.as_int();
+            bits &= (~0ULL << nextIndex);
+
+            if (bits == 0)
+            {
+                return std::nullopt;
+            }
+            return std::countr_zero(bits);
+        }
     };
 }  // namespace alp

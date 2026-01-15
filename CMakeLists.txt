@@ -45,6 +45,7 @@ target_sources(alpmap
         src/alp.cppm
         src/alp-map.cppm
         src/alp-set.cppm
+        src/backends/std_simd.cppm
 )
 
 target_compile_features(alpmap PUBLIC cxx_std_23)

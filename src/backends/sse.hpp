@@ -17,6 +17,26 @@ namespace alp
 
         using Mask = BitMask;
 
+        struct Iterable
+        {
+            BitMask bits;
+
+            struct Iterator
+            {
+                BitMask bits;
+                int operator*() const { return std::countr_zero(bits); }
+                Iterator& operator++()
+                {
+                    bits &= (bits - 1);
+                    return *this;
+                }
+                bool operator!=(Iterator const& other) const { return bits != other.bits; }
+            };
+
+            Iterator begin() const { return {bits}; }
+            Iterator end() const { return {0}; }
+        };
+
         static Register load(std::uint8_t const* ptr)
         {
             return _mm_loadu_si128(reinterpret_cast<Register const*>(ptr));
@@ -48,6 +68,19 @@ namespace alp
                 return std::nullopt;
             }
             return std::countr_zero(mask);
+        }
+
+        static Iterable iterate(Mask mask) { return Iterable{mask}; }
+
+        static std::optional<int> nextTrue(Mask mask, size_t offset)
+        {
+            BitMask bits = mask & (~0U << offset);
+
+            if (bits == 0)
+            {
+                return std::nullopt;
+            }
+            return std::countr_zero(bits);
         }
 
         static BitMask toBits(Mask mask) { return mask; }

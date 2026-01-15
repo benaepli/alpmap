@@ -24,10 +24,10 @@ namespace alp
     concept SimdBackend = requires(std::uint8_t const* ptr, std::uint8_t val) {
         { B::GroupSize } -> std::convertible_to<std::size_t>;
 
-        // Type aliases
-        typename B::BitMask;  // Scalar integer type for bit operations (e.g., uint64_t)
         typename B::Register;  // SIMD register type (e.g., eve::wide<uint8_t>)
         typename B::Mask;  // SIMD mask type (e.g., eve::logical<...>)
+
+        typename B::Iterable;  // Must provide begin()/end()
 
         // Load operation
         { B::load(ptr) } -> std::same_as<typename B::Register>;
@@ -41,9 +41,9 @@ namespace alp
         { B::any(typename B::Mask {}) } -> std::convertible_to<bool>;
         { B::firstTrue(typename B::Mask {}) } -> std::convertible_to<std::optional<int>>;
 
-        // Mask conversion to scalar bitmask
-        { B::toBits(typename B::Mask {}) } -> std::same_as<typename B::BitMask>;
-    };
+        { B::iterate(typename B::Mask {}) } -> std::same_as<typename B::Iterable>;
+        // Get the next set bit for some offset greater than zero
+        { B::nextTrue(typename B::Mask {}, size_t {}) } -> std::convertible_to<std::optional<int>>;    };
 
 #if defined(ALP_USE_EVE)
     export using alp::EveBackend;
@@ -80,42 +80,6 @@ namespace alp
         T const* element() const { return reinterpret_cast<T const*>(storage); }
     };
 
-    /// Iterable over set bits in a SIMD mask.
-    template<SimdBackend Backend>
-    struct MatchIterable
-    {
-        using bits_t = Backend::BitMask;
-        bits_t bits;
-
-        /// Constructs by extracting mask bits to scalar integer immediately.
-        explicit MatchIterable(Backend::Mask mask)
-            : bits(Backend::toBits(mask))
-        {
-        }
-
-        struct Iterator
-        {
-            bits_t bits;
-
-            /// Returns the index of the current lowest set bit.
-            int operator*() const { return std::countr_zero(bits); }
-
-            Iterator& operator++()
-            {
-                // Clear the lowest set bit efficiently: bits &= (bits - 1)
-                bits &= (bits - 1);
-                return *this;
-            }
-
-            bool operator!=(Iterator const& other) const { return bits != other.bits; }
-        };
-
-        Iterator begin() const { return {bits}; }
-        Iterator end() const { return {0}; }  // End state is when all bits are zero
-
-        explicit operator bool() const { return bits != 0; }
-    };
-
     /// A group of control bytes, the fundamental unit of Swiss Table probing.
     /// Uses SIMD instructions for fast parallel matching.
     template<SimdBackend Backend>
@@ -134,9 +98,9 @@ namespace alp
 
         /// Returns an iterator over all slots in the group of slots
         /// whose control hash matches.
-        MatchIterable<Backend> match(std::uint8_t h2) const
+        Backend::Iterable match(std::uint8_t h2) const
         {
-            return MatchIterable<Backend> {Backend::match(data, h2)};
+            return Backend::iterate(Backend::match(data, h2));
         }
 
         /// Returns a mask of all slots in the group that contain a value.
@@ -273,13 +237,10 @@ namespace alp
             Group<Backend> g {groupPtr};
             auto mask = g.matchFull();
 
-            auto bits = Backend::toBits(mask);
-            bits = (bits >> offset) << offset;
-
-            if (bits != 0)
+            auto idx = Backend::nextTrue(g.matchFull(), offset);
+            if (idx)
             {
-                int idx = std::countr_zero(bits);
-                int jump = idx - offset;
+                int jump = *idx - offset;
                 ctrl += jump;
                 slot += jump;
                 return *this;
@@ -302,12 +263,11 @@ namespace alp
                 Group<Backend> g {ctrl};
                 auto mask = g.matchFull();
 
-                auto bits = Backend::toBits(mask);
-                if (bits != 0)
+                auto idx = Backend::firstTrue(mask);
+                if (idx)
                 {
-                    int nextIndex = std::countr_zero(bits);
-                    ctrl += nextIndex;
-                    slot += nextIndex;
+                    ctrl += *idx;
+                    slot += *idx;
                     return *this;
                 }
 
@@ -528,7 +488,7 @@ namespace alp
                 auto baseSlot = group * LANE_COUNT;
                 Group<Backend> g {ctrl_ + baseSlot};
 
-                MatchIterable candidates = g.match(h2Val);
+                typename Backend::Iterable candidates = g.match(h2Val);
                 for (auto i : candidates)
                 {
                     auto slotNumber = baseSlot + i;
@@ -707,7 +667,7 @@ namespace alp
                     Group<Backend> g {ctrl_ + gIdx * LANE_COUNT};
                     auto fullMask = g.matchFull();
 
-                    for (int i : MatchIterable<Backend>(fullMask))
+                    for (int i : Backend::iterate(fullMask))
                     {
                         size_t oldIdx = gIdx * LANE_COUNT + i;
                         auto& oldSlot = slots_[oldIdx];
