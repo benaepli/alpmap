@@ -11,17 +11,47 @@ module;
 #include <utility>
 #include <vector>
 
-#include "eve/eve.hpp"
+#if defined(ALP_USE_EVE)
+#    include "backends/eve.hpp"
+#endif
+#include "backends/sse.hpp"
 
 export module alp:set;
 
 namespace alp
 {
-    constexpr auto native_size = eve::expected_cardinal_v<std::uint8_t>;
-    constexpr auto capped_size = std::min(native_size, static_cast<std::ptrdiff_t>(64));
-    using ctrl_simd = eve::wide<uint8_t, eve::fixed<capped_size>>;
-    constexpr size_t LANE_COUNT = ctrl_simd::size();
-    using ctrl_mask = eve::logical<ctrl_simd>;
+    export template<typename B>
+    concept SimdBackend = requires(std::uint8_t const* ptr, std::uint8_t val) {
+        { B::GroupSize } -> std::convertible_to<std::size_t>;
+
+        // Type aliases
+        typename B::BitMask;  // Scalar integer type for bit operations (e.g., uint64_t)
+        typename B::Register;  // SIMD register type (e.g., eve::wide<uint8_t>)
+        typename B::Mask;  // SIMD mask type (e.g., eve::logical<...>)
+
+        // Load operation
+        { B::load(ptr) } -> std::same_as<typename B::Register>;
+
+        // Matching operations return SIMD masks
+        { B::match(B::load(ptr), val) } -> std::same_as<typename B::Mask>;
+        { B::matchEmpty(B::load(ptr)) } -> std::same_as<typename B::Mask>;
+        { B::matchFull(B::load(ptr)) } -> std::same_as<typename B::Mask>;
+
+        // Mask query operations
+        { B::any(typename B::Mask {}) } -> std::convertible_to<bool>;
+        { B::firstTrue(typename B::Mask {}) } -> std::convertible_to<std::optional<int>>;
+
+        // Mask conversion to scalar bitmask
+        { B::toBits(typename B::Mask {}) } -> std::same_as<typename B::BitMask>;
+    };
+
+#if defined(ALP_USE_EVE)
+    export using alp::EveBackend;
+
+    using DefaultBackend = EveBackend;
+#else
+    using DefaultBackend = SseBackend;
+#endif
 
     using ctrl_t = uint8_t;
 
@@ -51,14 +81,15 @@ namespace alp
     };
 
     /// Iterable over set bits in a SIMD mask.
+    template<SimdBackend Backend>
     struct MatchIterable
     {
-        using bits_t = std::uint64_t;
+        using bits_t = Backend::BitMask;
         bits_t bits;
 
         /// Constructs by extracting mask bits to scalar integer immediately.
-        explicit MatchIterable(ctrl_mask mask)
-            : bits(eve::top_bits {mask}.as_int())
+        explicit MatchIterable(Backend::Mask mask)
+            : bits(Backend::toBits(mask))
         {
         }
 
@@ -87,39 +118,44 @@ namespace alp
 
     /// A group of control bytes, the fundamental unit of Swiss Table probing.
     /// Uses SIMD instructions for fast parallel matching.
+    template<SimdBackend Backend>
     struct Group
     {
-        ctrl_simd data;
+        using Register = Backend::Register;
+        using Mask = Backend::Mask;
+
+        Register data;
 
         /// Constructs a Group by loading control bytes from memory.
         explicit Group(ctrl_t const* ctrl)
-            : data(ctrl)
+            : data(Backend::load(ctrl))
         {
         }
 
         /// Returns an iterator over all slots in the group of slots
         /// whose control hash matches.
-        MatchIterable match(uint8_t h2) const { return MatchIterable {data == ctrl_simd(h2)}; }
+        MatchIterable<Backend> match(std::uint8_t h2) const
+        {
+            return MatchIterable<Backend> {Backend::match(data, h2)};
+        }
 
         /// Returns a mask of all slots in the group that contain a value.
         /// (Not empty, deleted, or sentinel)
-        ctrl_mask matchFull() const
-        {
-            return (data != static_cast<ctrl_t>(Ctrl::Empty))
-                && (data != static_cast<ctrl_t>(Ctrl::Deleted))
-                && (data != static_cast<ctrl_t>(Ctrl::Sentinel));
-        }
+        Mask matchFull() const { return Backend::matchFull(data); }
 
-        ctrl_mask matchEmpty() const { return data == static_cast<ctrl_t>(Ctrl::Empty); }
+        Mask matchEmpty() const { return Backend::matchEmpty(data); }
 
         /// Returns true if and only if there exists a slot in the group that has Ctrl::Empty.
-        bool anyEmpty() const { return eve::any(matchEmpty()); }
+        bool anyEmpty() const { return Backend::any(matchEmpty()); }
 
         /// Returns true if we've reached the sentinel at the end of the control array.
-        bool atEnd() const { return eve::any(data == static_cast<ctrl_t>(Ctrl::Sentinel)); }
+        bool atEnd() const
+        {
+            return Backend::any(Backend::match(data, static_cast<ctrl_t>(Ctrl::Sentinel)));
+        }
 
         /// Returns true if and only if there exists a slot that isn't empty, deleted, or sentinel.
-        bool hasValue() const { return eve::any(matchFull()); }
+        bool hasValue() const { return Backend::any(matchFull()); }
     };
 
     /// A hash policy that mixes bits to protect against poor std::hash implementations.
@@ -146,15 +182,17 @@ namespace alp
     };
 
     /// Forward declaration of the Table base class.
-    export template<typename T, typename Hash, typename Equal, typename Policy>
+    export template<typename T, typename Hash, typename Equal, typename Policy, SimdBackend Backend>
     class Table;
 
     /// Iterator for traversing elements in a Swiss Table.
     /// Uses the control byte array to efficiently skip empty/deleted slots.
-    export template<typename T>
+    export template<typename T, SimdBackend Backend>
     struct SetIterator
     {
-        template<typename U>
+        static constexpr size_t LANE_COUNT = Backend::GroupSize;
+
+        template<typename U, SimdBackend B>
         friend struct SetIterator;
 
         /// Pointer to the current control byte.
@@ -169,7 +207,7 @@ namespace alp
         }
 
         // Converting constructor: allows iterator to convert to const_iterator
-        SetIterator(SetIterator<std::remove_const_t<T>> const& other)
+        SetIterator(SetIterator<std::remove_const_t<T>, Backend> const& other)
             requires std::is_const_v<T> && (!std::is_same_v<T, std::remove_const_t<T>>)
             : ctrl(other.ctrl)
             , slot(reinterpret_cast<Slot<T>*>(other.slot))
@@ -181,7 +219,8 @@ namespace alp
 
         // Update comparison to work across iterator/const_iterator
         template<typename U>
-        friend bool operator==(SetIterator<T> const& lhs, SetIterator<U> const& rhs)
+        friend bool operator==(SetIterator<T, Backend> const& lhs,
+                               SetIterator<U, Backend> const& rhs)
         {
             return lhs.ctrl == rhs.ctrl;
         }
@@ -231,10 +270,10 @@ namespace alp
                 return skipEmptySlotsAligned();
             }
             auto const offset = groupOffset();
-            Group g {groupPtr};
+            Group<Backend> g {groupPtr};
             auto mask = g.matchFull();
 
-            auto bits = eve::top_bits {mask}.as_int();
+            auto bits = Backend::toBits(mask);
             bits = (bits >> offset) << offset;
 
             if (bits != 0)
@@ -260,11 +299,10 @@ namespace alp
         {
             while (true)
             {
-                Group g {ctrl};
+                Group<Backend> g {ctrl};
                 auto mask = g.matchFull();
 
-                // Use scalar bit manipulation instead of SIMD first_true
-                auto bits = eve::top_bits {mask}.as_int();
+                auto bits = Backend::toBits(mask);
                 if (bits != 0)
                 {
                     int nextIndex = std::countr_zero(bits);
@@ -282,7 +320,7 @@ namespace alp
             }
         }
 
-        template<typename U, typename Hash, typename Equal, typename Policy>
+        template<typename U, typename Hash, typename Equal, typename Policy, SimdBackend B>
         friend class Table;
     };
 
@@ -293,15 +331,17 @@ namespace alp
     /// Base class for Swiss Table hash containers.
     /// Implements the core Swiss Table algorithm with SIMD-accelerated probing.
     /// Uses open addressing with linear probing and a control byte array.
-    template<typename T, typename Hash, typename Equal, typename Policy>
+    template<typename T, typename Hash, typename Equal, typename Policy, SimdBackend Backend>
     class Table
     {
       protected:
+        static constexpr size_t LANE_COUNT = Backend::GroupSize;
+
         using value_type = T;
         using size_type = std::size_t;
         using difference_type = std::ptrdiff_t;
-        using iterator = SetIterator<T>;
-        using const_iterator = SetIterator<T const>;
+        using iterator = SetIterator<T, Backend>;
+        using const_iterator = SetIterator<T const, Backend>;
 
         Table() = default;
 
@@ -455,7 +495,7 @@ namespace alp
 
             while (true)
             {
-                Group g {ctrl_ + group * LANE_COUNT};
+                Group<Backend> g {ctrl_ + group * LANE_COUNT};
                 for (int i : g.match(h2Val))
                 {
                     if (Equal {}(key, *slots_[group * LANE_COUNT + i].element()))
@@ -486,7 +526,7 @@ namespace alp
             while (true)
             {
                 auto baseSlot = group * LANE_COUNT;
-                Group g {ctrl_ + baseSlot};
+                Group<Backend> g {ctrl_ + baseSlot};
 
                 MatchIterable candidates = g.match(h2Val);
                 for (auto i : candidates)
@@ -501,7 +541,7 @@ namespace alp
                 }
 
                 auto empty = g.matchEmpty();
-                auto emptyIdx = eve::first_true(empty);
+                auto emptyIdx = Backend::firstTrue(empty);
                 if (emptyIdx)
                 {
                     if (size_ + 1 > capacity_ * MAX_LOAD_FACTOR)
@@ -574,7 +614,7 @@ namespace alp
             auto alignedAddr = addr & ~static_cast<uintptr_t>(LANE_COUNT - 1);
             auto groupPtr = reinterpret_cast<ctrl_t*>(alignedAddr);
 
-            Group g {groupPtr};
+            Group<Backend> g {groupPtr};
             if (g.anyEmpty())
             {
                 ctrl_[offset] = static_cast<ctrl_t>(Ctrl::Empty);
@@ -631,10 +671,10 @@ namespace alp
 
                 while (true)
                 {
-                    Group g {newCtrl + group * LANE_COUNT};
+                    Group<Backend> g {newCtrl + group * LANE_COUNT};
                     auto emptyMask = g.matchEmpty();
 
-                    auto emptyIdx = eve::first_true(emptyMask);
+                    auto emptyIdx = Backend::firstTrue(emptyMask);
                     if (emptyIdx)
                     {
                         int offset = static_cast<int>(*emptyIdx);
@@ -664,10 +704,10 @@ namespace alp
             {
                 for (size_t gIdx = 0; gIdx < groups_; ++gIdx)
                 {
-                    Group g {ctrl_ + gIdx * LANE_COUNT};
+                    Group<Backend> g {ctrl_ + gIdx * LANE_COUNT};
                     auto fullMask = g.matchFull();
 
-                    for (int i : MatchIterable(fullMask))
+                    for (int i : MatchIterable<Backend>(fullMask))
                     {
                         size_t oldIdx = gIdx * LANE_COUNT + i;
                         auto& oldSlot = slots_[oldIdx];
@@ -692,7 +732,7 @@ namespace alp
 
         static ctrl_t* allocate(size_t count)
         {
-            constexpr size_t alignment = ctrl_simd::alignment();
+            constexpr size_t alignment = Backend::GroupSize;
             return static_cast<ctrl_t*>(std::aligned_alloc(alignment, sizeof(ctrl_t) * count));
         }
     };
@@ -702,11 +742,12 @@ namespace alp
     export template<typename T,
                     typename Hash = std::hash<std::remove_cvref_t<T>>,
                     typename Equal = std::equal_to<T>,
-                    typename Policy = MixHashPolicy>
+                    typename Policy = MixHashPolicy,
+                    SimdBackend Backend = DefaultBackend>
         requires std::move_constructible<T>
-    class Set : Table<T, Hash, Equal, Policy>
+    class Set : Table<T, Hash, Equal, Policy, Backend>
     {
-        using Base = Table<T, Hash, Equal, Policy>;
+        using Base = Table<T, Hash, Equal, Policy, Backend>;
 
       public:
         using value_type = T;
@@ -719,8 +760,8 @@ namespace alp
         using pointer = value_type*;
         using const_pointer = value_type const*;
 
-        using iterator = SetIterator<T const>;
-        using const_iterator = SetIterator<T const>;
+        using iterator = SetIterator<T const, Backend>;
+        using const_iterator = SetIterator<T const, Backend>;
 
         using Base::Base;
         using Base::clear;

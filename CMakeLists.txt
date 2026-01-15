@@ -15,20 +15,29 @@ option(BUILD_DOCS "Build Doxygen documentation" ON)
 
 include(FetchContent)
 
-FetchContent_Declare(
-        eve
-        URL https://github.com/jfalcou/eve/archive/refs/tags/v2023.02.15.zip
-)
+option(ALP_USE_EVE "Use EVE library for SIMD" ON)
+if (ALP_USE_EVE)
+    set(EVE_BUILD_DOCUMENTATION OFF)
+    set(EVE_BUILD_BENCHMARKS OFF)
+    set(EVE_BUILD_TEST OFF)
+    set(EVE_BUILD_EXAMPLES OFF)
 
-set(EVE_BUILD_DOCUMENTATION OFF)
-set(EVE_BUILD_BENCHMARKS OFF)
-set(EVE_BUILD_TEST OFF)
-set(EVE_BUILD_EXAMPLES OFF)
-FetchContent_MakeAvailable(eve)
+    FetchContent_Declare(
+            eve
+            URL https://github.com/jfalcou/eve/archive/refs/tags/v2023.02.15.zip
+    )
+    FetchContent_MakeAvailable(eve)
+endif ()
 
-add_library(alpmap)
 
-target_link_libraries(alpmap PRIVATE eve::eve)
+add_library(alpmap
+        src/backends/eve.hpp
+        src/backends/sse.hpp)
+
+if (ALP_USE_EVE)
+    target_compile_definitions(alpmap PRIVATE ALP_USE_EVE)
+    target_link_libraries(alpmap PRIVATE eve::eve)
+endif ()
 
 target_sources(alpmap
         PUBLIC
