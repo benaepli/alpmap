@@ -2,6 +2,7 @@ module;
 
 #include <expected>
 #include <functional>
+#include <ratio>
 #include <tuple>
 #include <utility>
 
@@ -72,21 +73,27 @@ namespace alp
                     typename Hash = std::hash<Key>,
                     typename Equal = std::equal_to<Key>,
                     typename Policy = MixHashPolicy,
-                    SimdBackend Backend = DefaultBackend>
+                    SimdBackend Backend = DefaultBackend,
+                    typename Allocator = std::allocator<std::byte>,
+                    typename LoadFactorRatio = DEFAULT_LOAD_FACTOR>
         requires std::move_constructible<std::pair<Key const, Value>>
     class Map
         : Table<std::pair<Key const, Value>,
                 MapHashAdapter<Key, Hash>,
                 MapEqualAdapter<Key, Equal>,
                 Policy,
-                Backend>
+                Backend,
+                Allocator,
+                LoadFactorRatio>
     {
         using PairType = std::pair<Key const, Value>;
         using Base = Table<PairType,
                            MapHashAdapter<Key, Hash>,
                            MapEqualAdapter<Key, Equal>,
                            Policy,
-                           Backend>;
+                           Backend,
+                           Allocator,
+                           LoadFactorRatio>;
 
       public:
         using key_type = Key;

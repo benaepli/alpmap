@@ -12,8 +12,9 @@ option(BUILD_BENCHMARKS "Build benchmark programs" OFF)
 option(BUILD_DOCS "Build Doxygen documentation" ON)
 
 
-include(FetchContent)
+option(ALP_USE_EXPERIMENTAL_SIMD "Use std::experimental::simd" OFF)
 
+include(FetchContent)
 option(ALP_USE_EVE "Use EVE library for SIMD" ON)
 if (ALP_USE_EVE)
     set(EVE_BUILD_DOCUMENTATION OFF)
@@ -37,7 +38,6 @@ target_sources(alpmap
         src/alp.cppm
         src/alp-map.cppm
         src/alp-set.cppm
-        src/backends/std_simd.cppm
         src/backends/sse.cppm
 )
 
@@ -49,6 +49,15 @@ if (ALP_USE_EVE)
             PUBLIC
             FILE_SET CXX_MODULES FILES
             src/backends/eve.cppm
+    )
+endif ()
+
+if (ALP_USE_EXPERIMENTAL_SIMD)
+    target_compile_definitions(alpmap PRIVATE ALP_USE_EXPERIMENTAL_SIMD)
+    target_sources(alpmap
+            PUBLIC
+            FILE_SET CXX_MODULES FILES
+            src/backends/std_simd.cppm
     )
 endif ()
 

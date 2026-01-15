@@ -8,8 +8,8 @@ module;
 #include <expected>
 #include <functional>
 #include <memory>
-
 #include <optional>
+#include <ratio>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -73,10 +73,12 @@ namespace alp
 
     /// A slot stores an element of type T using aligned raw storage.
     /// This allows us to manually control construction and destruction.
+    /// Also stores the full hash to avoid recomputation during rehash.
     template<typename T>
     struct Slot
     {
         alignas(T) uint8_t storage[sizeof(T)];
+        size_t hash;  // Cached hash for fast rehashing
 
         T* element() { return reinterpret_cast<T*>(storage); }
         T const* element() const { return reinterpret_cast<T const*>(storage); }
@@ -112,8 +114,8 @@ namespace alp
         {
             // Over-allocate: alignment for adjustment + pointer storage
             size_t extra = Alignment - 1 + sizeof(void*);
-            size_t totalUnits = (n + extra + sizeof(AlignedByte<Alignment>) - 1) /
-                                sizeof(AlignedByte<Alignment>);
+            size_t totalUnits =
+                (n + extra + sizeof(AlignedByte<Alignment>) - 1) / sizeof(AlignedByte<Alignment>);
             auto* raw = InnerAllocTraits::allocate(inner_, totalUnits);
             auto* rawBytes = reinterpret_cast<std::byte*>(raw);
 
@@ -136,8 +138,8 @@ namespace alp
             auto* raw = static_cast<AlignedByte<Alignment>*>(*header);
 
             size_t extra = Alignment - 1 + sizeof(void*);
-            size_t totalUnits = (n + extra + sizeof(AlignedByte<Alignment>) - 1) /
-                                sizeof(AlignedByte<Alignment>);
+            size_t totalUnits =
+                (n + extra + sizeof(AlignedByte<Alignment>) - 1) / sizeof(AlignedByte<Alignment>);
             InnerAllocTraits::deallocate(inner_, raw, totalUnits);
         }
 
@@ -146,8 +148,7 @@ namespace alp
             typename InnerAllocTraits::propagate_on_container_copy_assignment;
         using propagate_on_container_move_assignment =
             typename InnerAllocTraits::propagate_on_container_move_assignment;
-        using propagate_on_container_swap =
-            typename InnerAllocTraits::propagate_on_container_swap;
+        using propagate_on_container_swap = typename InnerAllocTraits::propagate_on_container_swap;
         using is_always_equal = typename InnerAllocTraits::is_always_equal;
 
         AlignedAllocatorAdapter select_on_container_copy_construction() const
@@ -251,8 +252,13 @@ namespace alp
     };
 
     /// Forward declaration of the Table base class.
-    export template<typename T, typename Hash, typename Equal, typename Policy, SimdBackend Backend,
-                    typename Allocator>
+    export template<typename T,
+                    typename Hash,
+                    typename Equal,
+                    typename Policy,
+                    SimdBackend Backend,
+                    typename Allocator,
+                    typename LoadFactorRatio>
     class Table;
 
     /// Iterator for traversing elements in a Swiss Table.
@@ -386,31 +392,43 @@ namespace alp
             }
         }
 
-        template<typename U, typename Hash, typename Equal, typename Policy, SimdBackend B,
-                 typename Allocator>
+        template<typename U,
+                 typename Hash,
+                 typename Equal,
+                 typename Policy,
+                 SimdBackend B,
+                 typename Allocator,
+                 typename LoadFactorRatio>
         friend class Table;
     };
 
-    /// Maximum load factor before rehashing is triggered.
+    /// Default load factor before rehashing is triggered.
     /// 7/8 = 0.875 provides a good balance between memory usage and probe length.
-    constexpr auto MAX_LOAD_FACTOR = 0.875;
+    using DEFAULT_LOAD_FACTOR = std::ratio<7, 8>;
 
     /// Concept: allocator that can be safely swapped without causing UB.
     /// Swap is safe if allocators propagate on swap or are always equal.
     template<typename Alloc>
     concept SafeSwappableAllocator =
-        std::allocator_traits<Alloc>::propagate_on_container_swap::value ||
-        std::allocator_traits<Alloc>::is_always_equal::value;
+        std::allocator_traits<Alloc>::propagate_on_container_swap::value
+        || std::allocator_traits<Alloc>::is_always_equal::value;
 
     /// Base class for Swiss Table hash containers.
     /// Implements the core Swiss Table algorithm with SIMD-accelerated probing.
     /// Uses open addressing with linear probing and a control byte array.
-    template<typename T, typename Hash, typename Equal, typename Policy, SimdBackend Backend,
-             typename Allocator = std::allocator<std::byte>>
+    template<typename T,
+             typename Hash,
+             typename Equal,
+             typename Policy,
+             SimdBackend Backend,
+             typename Allocator = std::allocator<std::byte>,
+             typename LoadFactorRatio = DEFAULT_LOAD_FACTOR>
     class Table
     {
       protected:
         static constexpr size_t LANE_COUNT = Backend::GroupSize;
+        static constexpr double loadFactor =
+            static_cast<double>(LoadFactorRatio::num) / static_cast<double>(LoadFactorRatio::den);
 
         using value_type = T;
         using size_type = std::size_t;
@@ -599,7 +617,7 @@ namespace alp
             }
 
             auto h = Hash {};
-            auto hash = h(key);
+            auto hash = Policy::apply(h(key));
             auto group = h1(hash) & (groups_ - 1);  // Since groups_ is a power of 2
             auto h2Val = h2(hash);
 
@@ -624,12 +642,14 @@ namespace alp
         /// Core insertion logic. Checks for duplicates using SIMD probing,
         /// triggers rehash if needed, and inserts into an empty slot.
         /// Returns the index and whether insertion occurred.
-        std::pair<size_t, bool> emplace_internal(T& value, size_t h1Val, ctrl_t h2Val)
+        std::pair<size_t, bool> emplace_internal(T& value, size_t hash)
         {
             if (capacity_ == 0)
             {
                 reserve(1);
             }
+            auto h1Val = h1(hash);
+            auto h2Val = h2(hash);
             size_t mask = groups_ - 1;
             size_t group = h1Val & mask;
 
@@ -654,16 +674,17 @@ namespace alp
                 auto emptyIdx = Backend::firstTrue(empty);
                 if (emptyIdx)
                 {
-                    if (size_ + 1 > capacity_ * MAX_LOAD_FACTOR)
+                    if (size_ + 1 > capacity_ * loadFactor)
                     {
                         reserve(size_ + 1);
-                        return emplace_internal(value, h1Val, h2Val);
+                        return emplace_internal(value, hash);
                     }
 
                     int offset = static_cast<int>(*emptyIdx);
                     size_t idx = baseSlot + offset;
 
                     ctrl_[idx] = h2Val;
+                    slots_[idx].hash = hash;  // Store full hash for fast rehashing
                     AllocTraits::construct(alloc_, slots_[idx].element(), std::move(value));
                     size_++;
 
@@ -683,12 +704,8 @@ namespace alp
             T* temp =
                 std::construct_at(reinterpret_cast<T*>(tempStorage), std::forward<Args>(args)...);
 
-            auto h = Hash {};
-            auto hash = h(*temp);
-            auto h1Val = h1(hash);
-            auto h2Val = h2(hash);
-
-            auto result = emplace_internal(*temp, h1Val, h2Val);
+            auto hash = Policy::apply(Hash {}(*temp));
+            auto result = emplace_internal(*temp, hash);
 
             temp->~T();
 
@@ -697,7 +714,7 @@ namespace alp
 
         void reserve(size_type count)
         {
-            auto desired = static_cast<size_t>(std::ceil(count / MAX_LOAD_FACTOR));
+            auto desired = static_cast<size_t>(std::ceil(count / loadFactor));
             if (desired <= capacity_)
             {
                 return;
@@ -736,9 +753,9 @@ namespace alp
         }
 
         /// Extracts the upper bits for group selection.
-        static constexpr size_t h1(size_t hash) { return Policy::apply(hash) >> 7; }
+        static constexpr size_t h1(size_t hash) { return hash >> 7; }
         /// Extracts the lower 7 bits for control byte matching.
-        static constexpr ctrl_t h2(size_t hash) { return Policy::apply(hash) & 0x7F; }
+        static constexpr ctrl_t h2(size_t hash) { return hash & 0x7F; }
 
         iterator iteratorAt(size_t offset) { return {ctrl_ + offset, slots_ + offset}; }
         const_iterator iteratorAt(size_t offset) const
@@ -783,8 +800,10 @@ namespace alp
 
             size_t mask = newGroupCount - 1;
 
-            auto insertUnchecked = [&](Slot<T>& oldSlot, size_t h1Val, ctrl_t h2Val)
+            auto insertUnchecked = [&](Slot<T>& oldSlot)
             {
+                auto h1Val = h1(oldSlot.hash);
+                auto h2Val = h2(oldSlot.hash);
                 size_t group = h1Val & mask;
 
                 while (true)
@@ -806,10 +825,11 @@ namespace alp
                         else
                         {
                             // Standard path: move construct and destroy
-                            AllocTraits::construct(alloc_, newSlots[idx].element(),
-                                              std::move(*oldSlot.element()));
+                            AllocTraits::construct(
+                                alloc_, newSlots[idx].element(), std::move(*oldSlot.element()));
                             AllocTraits::destroy(alloc_, oldSlot.element());
                         }
+                        newSlots[idx].hash = oldSlot.hash;  // Copy cached hash
                         newCtrl[idx] = h2Val;
                         return;
                     }
@@ -828,13 +848,7 @@ namespace alp
                     for (int i : Backend::iterate(fullMask))
                     {
                         size_t oldIdx = gIdx * LANE_COUNT + i;
-                        auto& oldSlot = slots_[oldIdx];
-
-                        auto hash = Hash {}(*oldSlot.element());
-                        auto h1Val = h1(hash);
-                        auto h2Val = h2(hash);
-
-                        insertUnchecked(oldSlot, h1Val, h2Val);
+                        insertUnchecked(slots_[oldIdx]);
                     }
                 }
 
@@ -874,11 +888,12 @@ namespace alp
                     typename Equal = std::equal_to<T>,
                     typename Policy = MixHashPolicy,
                     SimdBackend Backend = DefaultBackend,
-                    typename Allocator = std::allocator<std::byte>>
+                    typename Allocator = std::allocator<std::byte>,
+                    typename LoadFactorRatio = DEFAULT_LOAD_FACTOR>
         requires std::move_constructible<T>
-    class Set : Table<T, Hash, Equal, Policy, Backend, Allocator>
+    class Set : Table<T, Hash, Equal, Policy, Backend, Allocator, LoadFactorRatio>
     {
-        using Base = Table<T, Hash, Equal, Policy, Backend, Allocator>;
+        using Base = Table<T, Hash, Equal, Policy, Backend, Allocator, LoadFactorRatio>;
 
       public:
         using value_type = T;
