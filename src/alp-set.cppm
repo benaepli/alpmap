@@ -919,7 +919,7 @@ namespace alp
     /// A hash set based on Swiss Tables.
     /// Uses SIMD-accelerated probing for efficient lookup, insertion, and deletion.
     export template<typename T,
-                    typename Hash = std::hash<std::remove_cvref_t<T>>,
+                    typename Hash = RapidHasher,
                     typename Equal = std::equal_to<T>,
                     typename Policy = HashPolicySelector<T, Hash>::type,
                     SimdBackend Backend = DefaultBackend,

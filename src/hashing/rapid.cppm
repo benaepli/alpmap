@@ -3,6 +3,7 @@ module;
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <type_traits>
 
 #include "rapidhash.h"
@@ -46,25 +47,38 @@ namespace alp
         }
 
         template<typename T>
-            requires requires(T t) {
+            requires(!std::is_trivially_copyable_v<T>) && requires(T t) {
                 { t.data() } -> std::convertible_to<void const*>;
-                t.size();
+                { t.size() } -> std::convertible_to<std::size_t>;
+                typename T::value_type;
             }
         std::uint64_t operator()(T const& key) const noexcept
         {
-            return rapidhash_withSeed(key.data(), key.size() * sizeof(T::value_type), SEED);
+            return rapidhash_withSeed(key.data(), key.size() * sizeof(typename T::value_type), SEED);
+        }
+
+        // Fallback for types that are not trivially copyable and don't look like strings/containers
+        template<typename T>
+            requires(!std::is_trivially_copyable_v<T>) && (!(requires(T t) {
+                        { t.data() } -> std::convertible_to<void const*>;
+                        { t.size() } -> std::convertible_to<std::size_t>;
+                        typename T::value_type;
+                    }))
+        std::uint64_t operator()(T const& key) const noexcept
+        {
+            return std::hash<T> {}(key);
         }
     };
 
     /// Trait to select the appropriate hash policy based on the hasher type.
-    /// Default: Assume the hash is weak (like std::hash) and needs mixing.
+    /// Assume the hash is weak (like std::hash) and needs mixing.
     export template<typename T, typename Hash>
     struct HashPolicySelector
     {
         using type = MixHashPolicy;
     };
 
-    /// Specialization: If we are using RapidHasher, we don't need mixing.
+    /// If we are using RapidHasher, we don't need mixing.
     template<typename T>
     struct HashPolicySelector<T, RapidHasher>
     {

@@ -70,9 +70,9 @@ namespace alp
     /// Uses SIMD-accelerated probing for efficient lookup, insertion, and deletion.
     export template<typename Key,
                     typename Value,
-                    typename Hash = std::hash<Key>,
+                    typename Hash = RapidHasher,
                     typename Equal = std::equal_to<Key>,
-                    typename Policy = MixHashPolicy,
+                    typename Policy = HashPolicySelector<Key, Hash>::type,
                     SimdBackend Backend = DefaultBackend,
                     typename Allocator = std::allocator<std::byte>,
                     typename LoadFactorRatio = DEFAULT_LOAD_FACTOR,
