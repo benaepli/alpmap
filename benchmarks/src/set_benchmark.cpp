@@ -1,5 +1,7 @@
+#include <algorithm>
 #include <cstdint>
 #include <random>
+#include <string>
 #include <unordered_set>
 #include <vector>
 
@@ -9,43 +11,65 @@ import alp;
 
 namespace
 {
+    template<typename T>
+    struct DataGenerator;
 
-    /// Generate a vector of random integers for benchmark use
-    std::vector<int64_t> generateRandomInts(size_t count, uint64_t seed = 42)
+    template<>
+    struct DataGenerator<int64_t>
     {
-        std::mt19937_64 rng(seed);
-        std::uniform_int_distribution<int64_t> dist;
-        std::vector<int64_t> result;
-        result.reserve(count);
-        for (size_t i = 0; i < count; ++i)
+        static std::vector<int64_t> generate(size_t count, uint64_t seed = 42)
         {
-            result.push_back(dist(rng));
+            std::mt19937_64 rng(seed);
+            std::uniform_int_distribution<int64_t> dist;
+            std::vector<int64_t> result;
+            result.reserve(count);
+            for (size_t i = 0; i < count; ++i)
+            {
+                result.push_back(dist(rng));
+            }
+            return result;
         }
-        return result;
-    }
+    };
 
-    /// Generate a vector of sequential integers starting from 0
-    std::vector<int64_t> generateSequentialInts(size_t count)
+    template<>
+    struct DataGenerator<std::string>
     {
-        std::vector<int64_t> result;
-        result.reserve(count);
-        for (size_t i = 0; i < count; ++i)
+        static std::vector<std::string> generate(size_t count, uint64_t seed = 42)
         {
-            result.push_back(static_cast<int64_t>(i));
-        }
-        return result;
-    }
+            std::mt19937_64 rng(seed);
+            std::uniform_int_distribution<int> charDist(0, 61);
+            char const charset[] = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
-    /// Benchmark inserting sequential integers into an empty set
-    void bmSetInsertSequential(benchmark::State& state)
+            std::vector<std::string> result;
+            result.reserve(count);
+
+            size_t const length = 32;
+
+            for (size_t i = 0; i < count; ++i)
+            {
+                std::string s;
+                s.reserve(length);
+                for (size_t j = 0; j < length; ++j)
+                {
+                    s += charset[charDist(rng)];
+                }
+                result.push_back(std::move(s));
+            }
+            return result;
+        }
+    };
+
+    template<typename Container>
+    void bmInsert(benchmark::State& state)
     {
+        using T = typename Container::value_type;
         auto const count = static_cast<size_t>(state.range(0));
-        auto const data = generateSequentialInts(count);
+        auto const data = DataGenerator<T>::generate(count);
 
         for (auto _ : state)
         {
-            alp::Set<int64_t> set;
-            for (auto val : data)
+            Container set;
+            for (auto const& val : data)
             {
                 set.insert(val);
             }
@@ -53,89 +77,75 @@ namespace
         }
         state.SetItemsProcessed(state.iterations() * static_cast<int64_t>(count));
     }
-    BENCHMARK(bmSetInsertSequential)->Range(8, 1 << 17);
 
-    /// Benchmark inserting random integers (causes more collisions)
-    void bmSetInsertRandom(benchmark::State& state)
+    template<typename Container>
+    void bmLookupHit(benchmark::State& state)
     {
+        using T = typename Container::value_type;
         auto const count = static_cast<size_t>(state.range(0));
-        auto const data = generateRandomInts(count);
+        auto const data = DataGenerator<T>::generate(count);
 
-        for (auto _ : state)
-        {
-            alp::Set<int64_t> set;
-            for (auto val : data)
-            {
-                set.insert(val);
-            }
-            benchmark::DoNotOptimize(set);
-        }
-        state.SetItemsProcessed(state.iterations() * static_cast<int64_t>(count));
-    }
-    BENCHMARK(bmSetInsertRandom)->Range(8, 1 << 17);
-
-    /// Benchmark successful lookups (all elements exist)
-    void bmSetLookupHit(benchmark::State& state)
-    {
-        auto const count = static_cast<size_t>(state.range(0));
-        auto const data = generateRandomInts(count);
-        alp::Set<int64_t> set;
-        for (auto val : data)
+        Container set;
+        set.reserve(count);
+        for (auto const& val : data)
         {
             set.insert(val);
         }
 
         for (auto _ : state)
         {
-            for (auto val : data)
+            for (auto const& val : data)
             {
                 benchmark::DoNotOptimize(set.contains(val));
             }
         }
         state.SetItemsProcessed(state.iterations() * static_cast<int64_t>(count));
     }
-    BENCHMARK(bmSetLookupHit)->Range(8, 1 << 17);
 
-    /// Benchmark failed lookups (no elements exist)
-    void bmSetLookupMiss(benchmark::State& state)
+    template<typename Container>
+    void bmLookupMiss(benchmark::State& state)
     {
+        using T = typename Container::value_type;
         auto const count = static_cast<size_t>(state.range(0));
-        auto const data = generateRandomInts(count, 42);
-        auto const missData = generateRandomInts(count, 12345);  // Different seed
-        alp::Set<int64_t> set;
-        for (auto val : data)
+        auto const data = DataGenerator<T>::generate(count, 42);
+        auto const missData = DataGenerator<T>::generate(count, 1337);
+
+        Container set;
+        set.reserve(count);
+        for (auto const& val : data)
         {
             set.insert(val);
         }
 
         for (auto _ : state)
         {
-            for (auto val : missData)
+            for (auto const& val : missData)
             {
                 benchmark::DoNotOptimize(set.contains(val));
             }
         }
         state.SetItemsProcessed(state.iterations() * static_cast<int64_t>(count));
     }
-    BENCHMARK(bmSetLookupMiss)->Range(8, 1 << 17);
 
-    /// Benchmark erasing elements from the set
-    void bmSetErase(benchmark::State& state)
+    template<typename Container>
+    void bmErase(benchmark::State& state)
     {
+        using T = typename Container::value_type;
         auto const count = static_cast<size_t>(state.range(0));
-        auto const data = generateRandomInts(count);
+        auto const data = DataGenerator<T>::generate(count);
 
         for (auto _ : state)
         {
             state.PauseTiming();
-            alp::Set<int64_t> set;
-            for (auto val : data)
+            Container set;
+            set.reserve(count);
+            for (auto const& val : data)
             {
                 set.insert(val);
             }
             state.ResumeTiming();
 
-            for (auto val : data)
+            for (auto const& val : data)
             {
                 set.erase(val);
             }
@@ -143,344 +153,66 @@ namespace
         }
         state.SetItemsProcessed(state.iterations() * static_cast<int64_t>(count));
     }
-    BENCHMARK(bmSetErase)->Range(8, 1 << 17);
 
-    /// Benchmark iterating over all elements
-    void bmSetIterate(benchmark::State& state)
+    template<typename Container>
+    void bmIterate(benchmark::State& state)
     {
+        using T = typename Container::value_type;
         auto const count = static_cast<size_t>(state.range(0));
-        auto const data = generateRandomInts(count);
-        alp::Set<int64_t> set;
-        for (auto val : data)
+        auto const data = DataGenerator<T>::generate(count);
+
+        Container set;
+        set.reserve(count);
+        for (auto const& val : data)
         {
             set.insert(val);
         }
 
         for (auto _ : state)
         {
-            int64_t sum = 0;
+            size_t items = 0;
             for (auto const& val : set)
             {
-                sum += val;
+                benchmark::DoNotOptimize(val);
+                items++;
             }
-            benchmark::DoNotOptimize(sum);
+            benchmark::DoNotOptimize(items);
         }
         state.SetItemsProcessed(state.iterations() * static_cast<int64_t>(count));
     }
-    BENCHMARK(bmSetIterate)->Range(8, 1 << 17);
 
-    /// Benchmark copy construction
-    void bmSetCopy(benchmark::State& state)
+    template<typename Container>
+    void registerSuite(std::string const& suiteName)
     {
-        auto const count = static_cast<size_t>(state.range(0));
-        auto const data = generateRandomInts(count);
-        alp::Set<int64_t> set;
-        for (auto val : data)
+        auto registerWithRange = [&](std::string testName, auto func)
         {
-            set.insert(val);
-        }
+            benchmark::RegisterBenchmark((suiteName + "/" + testName).c_str(), func)
+                ->Range(8, 1 << 17);
+        };
 
-        for (auto _ : state)
-        {
-            alp::Set<int64_t> copy(set);
-            benchmark::DoNotOptimize(copy);
-        }
-        state.SetItemsProcessed(state.iterations() * static_cast<int64_t>(count));
+        registerWithRange("Insert", bmInsert<Container>);
+        registerWithRange("LookupHit", bmLookupHit<Container>);
+        registerWithRange("LookupMiss", bmLookupMiss<Container>);
+        registerWithRange("Erase", bmErase<Container>);
+        registerWithRange("Iterate", bmIterate<Container>);
     }
-    BENCHMARK(bmSetCopy)->Range(8, 1 << 17);
-
-    /// Baseline: std::unordered_set insert
-    void bmStdSetInsertSequential(benchmark::State& state)
-    {
-        auto const count = static_cast<size_t>(state.range(0));
-        auto const data = generateSequentialInts(count);
-
-        for (auto _ : state)
-        {
-            std::unordered_set<int64_t> set;
-            for (auto val : data)
-            {
-                set.insert(val);
-            }
-            benchmark::DoNotOptimize(set);
-        }
-        state.SetItemsProcessed(state.iterations() * static_cast<int64_t>(count));
-    }
-    BENCHMARK(bmStdSetInsertSequential)->Range(8, 1 << 17);
-
-    /// Baseline: std::unordered_set random insert
-    void bmStdSetInsertRandom(benchmark::State& state)
-    {
-        auto const count = static_cast<size_t>(state.range(0));
-        auto const data = generateRandomInts(count);
-
-        for (auto _ : state)
-        {
-            std::unordered_set<int64_t> set;
-            for (auto val : data)
-            {
-                set.insert(val);
-            }
-            benchmark::DoNotOptimize(set);
-        }
-        state.SetItemsProcessed(state.iterations() * static_cast<int64_t>(count));
-    }
-    BENCHMARK(bmStdSetInsertRandom)->Range(8, 1 << 17);
-
-    /// Baseline: std::unordered_set lookup hit
-    void bmStdSetLookupHit(benchmark::State& state)
-    {
-        auto const count = static_cast<size_t>(state.range(0));
-        auto const data = generateRandomInts(count);
-        std::unordered_set<int64_t> set;
-        for (auto val : data)
-        {
-            set.insert(val);
-        }
-
-        for (auto _ : state)
-        {
-            for (auto val : data)
-            {
-                benchmark::DoNotOptimize(set.contains(val));
-            }
-        }
-        state.SetItemsProcessed(state.iterations() * static_cast<int64_t>(count));
-    }
-    BENCHMARK(bmStdSetLookupHit)->Range(8, 1 << 17);
-
-    /// Baseline: std::unordered_set lookup miss
-    void bmStdSetLookupMiss(benchmark::State& state)
-    {
-        auto const count = static_cast<size_t>(state.range(0));
-        auto const data = generateRandomInts(count, 42);
-        auto const missData = generateRandomInts(count, 12345);
-        std::unordered_set<int64_t> set;
-        for (auto val : data)
-        {
-            set.insert(val);
-        }
-
-        for (auto _ : state)
-        {
-            for (auto val : missData)
-            {
-                benchmark::DoNotOptimize(set.contains(val));
-            }
-        }
-        state.SetItemsProcessed(state.iterations() * static_cast<int64_t>(count));
-    }
-    BENCHMARK(bmStdSetLookupMiss)->Range(8, 1 << 17);
-
-    /// Baseline: std::unordered_set iterate
-    void bmStdSetIterate(benchmark::State& state)
-    {
-        auto const count = static_cast<size_t>(state.range(0));
-        auto const data = generateRandomInts(count);
-        std::unordered_set<int64_t> set;
-        for (auto val : data)
-        {
-            set.insert(val);
-        }
-
-        for (auto _ : state)
-        {
-            int64_t sum = 0;
-            for (auto const& val : set)
-            {
-                sum += val;
-            }
-            benchmark::DoNotOptimize(sum);
-        }
-        state.SetItemsProcessed(state.iterations() * static_cast<int64_t>(count));
-    }
-    BENCHMARK(bmStdSetIterate)->Range(8, 1 << 17);
-
-    /// Baseline: std::unordered_set erase
-    void bmStdSetErase(benchmark::State& state)
-    {
-        auto const count = static_cast<size_t>(state.range(0));
-        auto const data = generateRandomInts(count);
-
-        for (auto _ : state)
-        {
-            state.PauseTiming();
-            std::unordered_set<int64_t> set;
-            for (auto val : data)
-            {
-                set.insert(val);
-            }
-            state.ResumeTiming();
-
-            for (auto val : data)
-            {
-                set.erase(val);
-            }
-            benchmark::DoNotOptimize(set);
-        }
-        state.SetItemsProcessed(state.iterations() * static_cast<int64_t>(count));
-    }
-    BENCHMARK(bmStdSetErase)->Range(8, 1 << 17);
-
-    /// Baseline: std::unordered_set copy
-    void bmStdSetCopy(benchmark::State& state)
-    {
-        auto const count = static_cast<size_t>(state.range(0));
-        auto const data = generateRandomInts(count);
-        std::unordered_set<int64_t> set;
-        for (auto val : data)
-        {
-            set.insert(val);
-        }
-
-        for (auto _ : state)
-        {
-            std::unordered_set<int64_t> copy(set);
-            benchmark::DoNotOptimize(copy);
-        }
-        state.SetItemsProcessed(state.iterations() * static_cast<int64_t>(count));
-    }
-    BENCHMARK(bmStdSetCopy)->Range(8, 1 << 17);
-
-    // ============================================================================
-
-    /// Template benchmark for insert with configurable hash policy
-    template<typename Policy>
-    void bmSetInsertRandomPolicy(benchmark::State& state)
-    {
-        auto const count = static_cast<size_t>(state.range(0));
-        auto const data = generateRandomInts(count);
-
-        for (auto _ : state)
-        {
-            alp::Set<int64_t, std::hash<int64_t>, std::equal_to<int64_t>, Policy> set;
-            for (auto val : data)
-            {
-                set.insert(val);
-            }
-            benchmark::DoNotOptimize(set);
-        }
-        state.SetItemsProcessed(state.iterations() * static_cast<int64_t>(count));
-    }
-    BENCHMARK(bmSetInsertRandomPolicy<alp::MixHashPolicy>)
-        ->Range(8, 1 << 17)
-        ->Name("bmSetInsertRandom/MixHashPolicy");
-    BENCHMARK(bmSetInsertRandomPolicy<alp::IdentityHashPolicy>)
-        ->Range(8, 1 << 17)
-        ->Name("bmSetInsertRandom/IdentityHashPolicy");
-
-    /// Template benchmark for sequential insert with configurable hash policy
-    template<typename Policy>
-    void bmSetInsertSequentialPolicy(benchmark::State& state)
-    {
-        auto const count = static_cast<size_t>(state.range(0));
-        auto const data = generateSequentialInts(count);
-
-        for (auto _ : state)
-        {
-            alp::Set<int64_t, std::hash<int64_t>, std::equal_to<int64_t>, Policy> set;
-            for (auto val : data)
-            {
-                set.insert(val);
-            }
-            benchmark::DoNotOptimize(set);
-        }
-        state.SetItemsProcessed(state.iterations() * static_cast<int64_t>(count));
-    }
-    BENCHMARK(bmSetInsertSequentialPolicy<alp::MixHashPolicy>)
-        ->Range(8, 1 << 17)
-        ->Name("bmSetInsertSequential/MixHashPolicy");
-    BENCHMARK(bmSetInsertSequentialPolicy<alp::IdentityHashPolicy>)
-        ->Range(8, 1 << 17)
-        ->Name("bmSetInsertSequential/IdentityHashPolicy");
-
-    /// Template benchmark for lookup hit with configurable hash policy
-    template<typename Policy>
-    void bmSetLookupHitPolicy(benchmark::State& state)
-    {
-        auto const count = static_cast<size_t>(state.range(0));
-        auto const data = generateRandomInts(count);
-        alp::Set<int64_t, std::hash<int64_t>, std::equal_to<int64_t>, Policy> set;
-        for (auto val : data)
-        {
-            set.insert(val);
-        }
-
-        for (auto _ : state)
-        {
-            for (auto val : data)
-            {
-                benchmark::DoNotOptimize(set.contains(val));
-            }
-        }
-        state.SetItemsProcessed(state.iterations() * static_cast<int64_t>(count));
-    }
-    BENCHMARK(bmSetLookupHitPolicy<alp::MixHashPolicy>)
-        ->Range(8, 1 << 17)
-        ->Name("bmSetLookupHit/MixHashPolicy");
-    BENCHMARK(bmSetLookupHitPolicy<alp::IdentityHashPolicy>)
-        ->Range(8, 1 << 17)
-        ->Name("bmSetLookupHit/IdentityHashPolicy");
-
-    /// Template benchmark for lookup miss with configurable hash policy
-    template<typename Policy>
-    void bmSetLookupMissPolicy(benchmark::State& state)
-    {
-        auto const count = static_cast<size_t>(state.range(0));
-        auto const data = generateRandomInts(count, 42);
-        auto const missData = generateRandomInts(count, 12345);
-        alp::Set<int64_t, std::hash<int64_t>, std::equal_to<int64_t>, Policy> set;
-        for (auto val : data)
-        {
-            set.insert(val);
-        }
-
-        for (auto _ : state)
-        {
-            for (auto val : missData)
-            {
-                benchmark::DoNotOptimize(set.contains(val));
-            }
-        }
-        state.SetItemsProcessed(state.iterations() * static_cast<int64_t>(count));
-    }
-    BENCHMARK(bmSetLookupMissPolicy<alp::MixHashPolicy>)
-        ->Range(8, 1 << 17)
-        ->Name("bmSetLookupMiss/MixHashPolicy");
-    BENCHMARK(bmSetLookupMissPolicy<alp::IdentityHashPolicy>)
-        ->Range(8, 1 << 17)
-        ->Name("bmSetLookupMiss/IdentityHashPolicy");
-
-    /// Template benchmark for erase with configurable hash policy
-    template<typename Policy>
-    void bmSetErasePolicy(benchmark::State& state)
-    {
-        auto const count = static_cast<size_t>(state.range(0));
-        auto const data = generateRandomInts(count);
-
-        for (auto _ : state)
-        {
-            state.PauseTiming();
-            alp::Set<int64_t, std::hash<int64_t>, std::equal_to<int64_t>, Policy> set;
-            for (auto val : data)
-            {
-                set.insert(val);
-            }
-            state.ResumeTiming();
-
-            for (auto val : data)
-            {
-                set.erase(val);
-            }
-            benchmark::DoNotOptimize(set);
-        }
-        state.SetItemsProcessed(state.iterations() * static_cast<int64_t>(count));
-    }
-    BENCHMARK(bmSetErasePolicy<alp::MixHashPolicy>)
-        ->Range(8, 1 << 17)
-        ->Name("bmSetErase/MixHashPolicy");
-    BENCHMARK(bmSetErasePolicy<alp::IdentityHashPolicy>)
-        ->Range(8, 1 << 17)
-        ->Name("bmSetErase/IdentityHashPolicy");
 
 }  // namespace
+
+int main(int argc, char** argv)
+{
+    registerSuite<alp::Set<int64_t>>("Alp_Int64");
+    registerSuite<alp::Set<std::string>>("Alp_String");
+
+    registerSuite<std::unordered_set<int64_t>>("Std_Int64");
+    registerSuite<std::unordered_set<std::string>>("Std_String");
+
+    using AlpIdentityInt =
+        alp::Set<int64_t, std::hash<int64_t>, std::equal_to<int64_t>, alp::IdentityHashPolicy>;
+    registerSuite<AlpIdentityInt>("Alp_Int64_Identity");
+
+    benchmark::Initialize(&argc, argv);
+    benchmark::RunSpecifiedBenchmarks();
+    benchmark::Shutdown();
+    return 0;
+}

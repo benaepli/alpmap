@@ -3,7 +3,6 @@ cmake_minimum_required(VERSION 3.30)
 project(alpmap VERSION 0.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_EXTENSIONS OFF)
-set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_SCAN_FOR_MODULES ON)
 
@@ -13,14 +12,23 @@ option(BUILD_BENCHMARKS "Build benchmark programs" OFF)
 option(BUILD_DOCS "Build Doxygen documentation" ON)
 
 
-set(TOMLPLUSPLUS_BUILD_MODULES ON)
+option(ALP_USE_EXPERIMENTAL_SIMD "Use std::experimental::simd" OFF)
+
 include(FetchContent)
-FetchContent_Declare(
-        tomlplusplus
-        GIT_REPOSITORY https://github.com/marzer/tomlplusplus.git
-        GIT_TAG v3.4.0
-)
-FetchContent_MakeAvailable(tomlplusplus)
+option(ALP_USE_EVE "Use EVE library for SIMD" ON)
+if (ALP_USE_EVE)
+    set(EVE_BUILD_DOCUMENTATION OFF)
+    set(EVE_BUILD_BENCHMARKS OFF)
+    set(EVE_BUILD_TEST OFF)
+    set(EVE_BUILD_EXAMPLES OFF)
+
+    FetchContent_Declare(
+            eve
+            URL https://github.com/jfalcou/eve/archive/refs/tags/v2023.02.15.zip
+    )
+    FetchContent_MakeAvailable(eve)
+endif ()
+
 
 add_library(alpmap)
 
@@ -30,17 +38,30 @@ target_sources(alpmap
         src/alp.cppm
         src/alp-map.cppm
         src/alp-set.cppm
+        src/backends/sse.cppm
 )
 
-target_link_libraries(alpmap
-        PUBLIC
-        #        asio::asio
-        #        argparse::argparse
-        #        spdlog::spdlog
-        tomlplusplus::tomlplusplus
-)
 
-target_compile_features(alpmap PUBLIC cxx_std_23)
+if (ALP_USE_EVE)
+    target_compile_definitions(alpmap PRIVATE ALP_USE_EVE)
+    target_link_libraries(alpmap PRIVATE eve::eve)
+    target_sources(alpmap
+            PUBLIC
+            FILE_SET CXX_MODULES FILES
+            src/backends/eve.cppm
+    )
+endif ()
+
+if (ALP_USE_EXPERIMENTAL_SIMD)
+    target_compile_definitions(alpmap PRIVATE ALP_USE_EXPERIMENTAL_SIMD)
+    target_sources(alpmap
+            PUBLIC
+            FILE_SET CXX_MODULES FILES
+            src/backends/std_simd.cppm
+    )
+endif ()
+
+target_compile_features(alpmap PUBLIC cxx_std_26)
 
 if (BUILD_TESTS)
     enable_testing()

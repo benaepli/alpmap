@@ -2,6 +2,7 @@ module;
 
 #include <expected>
 #include <functional>
+#include <ratio>
 #include <tuple>
 #include <utility>
 
@@ -71,25 +72,36 @@ namespace alp
                     typename Value,
                     typename Hash = std::hash<Key>,
                     typename Equal = std::equal_to<Key>,
-                    typename Policy = MixHashPolicy>
+                    typename Policy = MixHashPolicy,
+                    SimdBackend Backend = DefaultBackend,
+                    typename Allocator = std::allocator<std::byte>,
+                    typename LoadFactorRatio = DEFAULT_LOAD_FACTOR>
         requires std::move_constructible<std::pair<Key const, Value>>
     class Map
-        : private Table<std::pair<Key const, Value>,
-                        MapHashAdapter<Key, Hash>,
-                        MapEqualAdapter<Key, Equal>,
-                        Policy>
+        : Table<std::pair<Key const, Value>,
+                MapHashAdapter<Key, Hash>,
+                MapEqualAdapter<Key, Equal>,
+                Policy,
+                Backend,
+                Allocator,
+                LoadFactorRatio>
     {
         using PairType = std::pair<Key const, Value>;
-        using Base =
-            Table<PairType, MapHashAdapter<Key, Hash>, MapEqualAdapter<Key, Equal>, Policy>;
+        using Base = Table<PairType,
+                           MapHashAdapter<Key, Hash>,
+                           MapEqualAdapter<Key, Equal>,
+                           Policy,
+                           Backend,
+                           Allocator,
+                           LoadFactorRatio>;
 
       public:
         using key_type = Key;
         using mapped_type = Value;
         using value_type = PairType;
-        using size_type = typename Base::size_type;
-        using iterator = typename Base::iterator;
-        using const_iterator = typename Base::const_iterator;
+        using size_type = Base::size_type;
+        using iterator = Base::iterator;
+        using const_iterator = Base::const_iterator;
 
         using Base::Base;
 
@@ -130,7 +142,7 @@ namespace alp
         template<typename... Args>
         std::pair<iterator, bool> emplace(Args&&... args)
         {
-            auto [idx, success] = Base::emplace_internal(std::forward<Args>(args)...);
+            auto [idx, success] = Base::emplace_wrapper(std::forward<Args>(args)...);
             return {Base::iteratorAt(idx), success};
         }
 
