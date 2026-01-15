@@ -81,6 +81,38 @@ namespace alp
 
     using DefaultHashStoragePolicy = NoStoreHashTag;
 
+    export struct LinearProbing
+    {
+        size_t seq = 0;
+
+        explicit LinearProbing(size_t /*startGroup*/) {}
+
+        inline size_t nextGroup(size_t currentGroup, size_t mask)
+        {
+            return (currentGroup + 1) & mask;
+        }
+    };
+
+    export struct QuadraticProbing
+    {
+        size_t seq = 0;
+
+        explicit QuadraticProbing(size_t /*startGroup*/) {}
+
+        inline size_t nextGroup(size_t currentGroup, size_t mask)
+        {
+            seq++;
+            return (currentGroup + seq) & mask;
+        }
+    };
+
+    template<typename S>
+    concept ProbingScheme = requires(S strategy, size_t group, size_t mask) {
+        { strategy.nextGroup(group, mask) } -> std::convertible_to<size_t>;
+    };
+
+    export using DefaultProber = QuadraticProbing;
+
     /// A slot stores an element of type T using aligned raw storage.
     /// This allows us to manually control construction and destruction.
     /// Primary template: stores the full hash to avoid recomputation during rehash.
@@ -262,7 +294,8 @@ namespace alp
                     SimdBackend Backend,
                     typename Allocator,
                     typename LoadFactorRatio,
-                    typename HashStoragePolicy>
+                    typename HashStoragePolicy,
+                    typename Prober>
     class Table;
 
     /// Iterator for traversing elements in a Swiss Table.
@@ -403,13 +436,14 @@ namespace alp
                  SimdBackend B,
                  typename Allocator,
                  typename LoadFactorRatio,
-                 typename H>
+                 typename H,
+                 typename Prober>
         friend class Table;
     };
 
     /// Default load factor before rehashing is triggered.
     /// 7/8 = 0.875 provides a good balance between memory usage and probe length.
-    using DEFAULT_LOAD_FACTOR = std::ratio<7, 8>;
+    export using DefaultLoadFactor = std::ratio<7, 8>;
 
     /// Concept: allocator that can be safely swapped without causing UB.
     /// Swap is safe if allocators propagate on swap or are always equal.
@@ -427,8 +461,9 @@ namespace alp
              typename Policy,
              SimdBackend Backend,
              typename Allocator = std::allocator<std::byte>,
-             typename LoadFactorRatio = DEFAULT_LOAD_FACTOR,
-             typename HashStoragePolicy = DefaultHashStoragePolicy>
+             typename LoadFactorRatio = DefaultLoadFactor,
+             typename HashStoragePolicy = DefaultHashStoragePolicy,
+             typename Prober = DefaultProber>
     class Table
     {
       protected:
@@ -625,9 +660,11 @@ namespace alp
 
             auto h = Hash {};
             auto hash = Policy::apply(h(key));
-            auto group = h1(hash) & (groups_ - 1);  // Since groups_ is a power of 2
+            size_t mask = groups_ - 1;
+            auto group = h1(hash) & mask;  // Since groups_ is a power of 2
             auto h2Val = h2(hash);
 
+            Prober prober {group};
             while (true)
             {
                 Group<Backend> g {ctrl_ + group * LANE_COUNT};
@@ -642,7 +679,7 @@ namespace alp
                 {
                     return ctrlLen_;
                 }
-                group = (group + 1) & (groups_ - 1);
+                group = prober.nextGroup(group, mask);
             }
         }
 
@@ -660,6 +697,7 @@ namespace alp
             size_t mask = groups_ - 1;
             size_t group = h1Val & mask;
 
+            Prober prober {group};
             while (true)
             {
                 auto baseSlot = group * LANE_COUNT;
@@ -698,8 +736,7 @@ namespace alp
 
                     return {idx, true};
                 }
-
-                group = (group + 1) & mask;
+                group = prober.nextGroup(group, mask);
             }
         }
 
@@ -840,6 +877,7 @@ namespace alp
                 auto h1Val = h1(fullHash);
                 auto h2Val = h2(fullHash);
                 size_t group = h1Val & mask;
+                Prober prober {group};
 
                 while (true)
                 {
@@ -869,7 +907,7 @@ namespace alp
                         return;
                     }
 
-                    group = (group + 1) & mask;
+                    group = prober.nextGroup(group, mask);
                 }
             };
 
@@ -924,14 +962,30 @@ namespace alp
                     typename Policy = HashPolicySelector<T, Hash>::type,
                     SimdBackend Backend = DefaultBackend,
                     typename Allocator = std::allocator<std::byte>,
-                    typename LoadFactorRatio = DEFAULT_LOAD_FACTOR,
-                    typename HashStoragePolicy = DefaultHashStoragePolicy>
+                    typename LoadFactorRatio = DefaultLoadFactor,
+                    typename HashStoragePolicy = DefaultHashStoragePolicy,
+                    typename Prober = DefaultProber>
         requires std::move_constructible<T>
     class Set
-        : Table<T, Hash, Equal, Policy, Backend, Allocator, LoadFactorRatio, HashStoragePolicy>
+        : Table<T,
+                Hash,
+                Equal,
+                Policy,
+                Backend,
+                Allocator,
+                LoadFactorRatio,
+                HashStoragePolicy,
+                Prober>
     {
-        using Base =
-            Table<T, Hash, Equal, Policy, Backend, Allocator, LoadFactorRatio, HashStoragePolicy>;
+        using Base = Table<T,
+                           Hash,
+                           Equal,
+                           Policy,
+                           Backend,
+                           Allocator,
+                           LoadFactorRatio,
+                           HashStoragePolicy,
+                           Prober>;
 
       public:
         using value_type = T;

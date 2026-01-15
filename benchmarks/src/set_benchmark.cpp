@@ -64,7 +64,7 @@ namespace
     template<typename Container>
     void bmInsert(benchmark::State& state)
     {
-        using T = typename Container::value_type;
+        using T = Container::value_type;
         auto const count = static_cast<size_t>(state.range(0));
         auto const data = DataGenerator<T>::generate(count);
 
@@ -83,7 +83,7 @@ namespace
     template<typename Container>
     void bmLookupHit(benchmark::State& state)
     {
-        using T = typename Container::value_type;
+        using T = Container::value_type;
         auto const count = static_cast<size_t>(state.range(0));
         auto const data = DataGenerator<T>::generate(count);
 
@@ -199,17 +199,44 @@ namespace
         registerWithRange("Iterate", bmIterate<Container>);
     }
 
+    template<typename T,
+             typename Hash = alp::RapidHasher,
+             typename Policy = alp::HashPolicySelector<T, Hash>::type,
+             typename LoadFactorRatio = alp::DefaultLoadFactor,
+             typename HashStoragePolicy = alp::DefaultHashStoragePolicy>
+    void registerProbingSuites(std::string const& suiteName)
+    {
+        registerSuite<alp::Set<T,
+                               Hash,
+                               std::equal_to<T>,
+                               Policy,
+                               alp::DefaultBackend,
+                               std::allocator<std::byte>,
+                               LoadFactorRatio,
+                               HashStoragePolicy,
+                               alp::LinearProbing>>(suiteName + "_Linear");
+        registerSuite<alp::Set<T,
+                               Hash,
+                               std::equal_to<T>,
+                               Policy,
+                               alp::DefaultBackend,
+                               std::allocator<std::byte>,
+                               LoadFactorRatio,
+                               HashStoragePolicy,
+                               alp::QuadraticProbing>>(suiteName + "_Quadratic");
+    }
+
 }  // namespace
 
 int main(int argc, char** argv)
 {
     benchmark::MaybeReenterWithoutASLR(argc, argv);
 
-    registerSuite<alp::Set<int64_t>>("Alp_Int64_Rapid");
-    registerSuite<alp::Set<std::string>>("Alp_String_Rapid");
+    registerProbingSuites<int64_t>("Alp_Int64_Rapid");
+    registerProbingSuites<std::string>("Alp_String_Rapid");
 
-    registerSuite<alp::Set<int64_t, std::hash<int64_t>>>("Alp_Int64_StdHash");
-    registerSuite<alp::Set<std::string, std::hash<std::string>>>("Alp_String_StdHash");
+    registerProbingSuites<int64_t, std::hash<int64_t>>("Alp_Int64_StdHash");
+    registerProbingSuites<std::string, std::hash<std::string>>("Alp_String_StdHash");
 
     registerSuite<std::unordered_set<int64_t>>("Std_UnorderedSet_Int64");
     registerSuite<std::unordered_set<std::string>>("Std_UnorderedSet_String");
@@ -217,66 +244,42 @@ int main(int argc, char** argv)
     registerSuite<absl::flat_hash_set<int64_t>>("Absl_FlatHashSet_Int64");
     registerSuite<absl::flat_hash_set<std::string>>("Absl_FlatHashSet_String");
 
-    using StringRapid_StoreHash_LF75 = alp::Set<std::string,
-                                                alp::RapidHasher,
-                                                std::equal_to<std::string>,
-                                                alp::IdentityHashPolicy,
-                                                alp::DefaultBackend,
-                                                std::allocator<std::byte>,
-                                                std::ratio<3, 4>,
-                                                alp::StoreHashTag>;
+    // Load Factor Benchmarks (87.5%, 85%, 90%)
+    using LF875 = std::ratio<7, 8>;
+    using LF85 = std::ratio<17, 20>;
+    using LF90 = std::ratio<9, 10>;
 
-    using StringRapid_StoreHash_LF85 = alp::Set<std::string,
-                                                alp::RapidHasher,
-                                                std::equal_to<std::string>,
-                                                alp::IdentityHashPolicy,
-                                                alp::DefaultBackend,
-                                                std::allocator<std::byte>,
-                                                std::ratio<17, 20>,
-                                                alp::StoreHashTag>;
+    registerProbingSuites<std::string,
+                          alp::RapidHasher,
+                          alp::IdentityHashPolicy,
+                          LF875,
+                          alp::StoreHashTag>("Alp_String_Rapid_StoreHash_LF875");
+    registerProbingSuites<std::string,
+                          alp::RapidHasher,
+                          alp::IdentityHashPolicy,
+                          LF85,
+                          alp::StoreHashTag>("Alp_String_Rapid_StoreHash_LF85");
+    registerProbingSuites<std::string,
+                          alp::RapidHasher,
+                          alp::IdentityHashPolicy,
+                          LF90,
+                          alp::StoreHashTag>("Alp_String_Rapid_StoreHash_LF90");
 
-    using StringRapid_StoreHash_LF90 = alp::Set<std::string,
-                                                alp::RapidHasher,
-                                                std::equal_to<std::string>,
-                                                alp::IdentityHashPolicy,
-                                                alp::DefaultBackend,
-                                                std::allocator<std::byte>,
-                                                std::ratio<9, 10>,
-                                                alp::StoreHashTag>;
-
-    using StringRapid_NoStoreHash_LF75 = alp::Set<std::string,
-                                                  alp::RapidHasher,
-                                                  std::equal_to<std::string>,
-                                                  alp::IdentityHashPolicy,
-                                                  alp::DefaultBackend,
-                                                  std::allocator<std::byte>,
-                                                  std::ratio<3, 4>,
-                                                  alp::NoStoreHashTag>;
-
-    using StringRapid_NoStoreHash_LF85 = alp::Set<std::string,
-                                                  alp::RapidHasher,
-                                                  std::equal_to<std::string>,
-                                                  alp::IdentityHashPolicy,
-                                                  alp::DefaultBackend,
-                                                  std::allocator<std::byte>,
-                                                  std::ratio<17, 20>,
-                                                  alp::NoStoreHashTag>;
-
-    using StringRapid_NoStoreHash_LF90 = alp::Set<std::string,
-                                                  alp::RapidHasher,
-                                                  std::equal_to<std::string>,
-                                                  alp::IdentityHashPolicy,
-                                                  alp::DefaultBackend,
-                                                  std::allocator<std::byte>,
-                                                  std::ratio<9, 10>,
-                                                  alp::NoStoreHashTag>;
-    registerSuite<StringRapid_StoreHash_LF75>("Alp_String_Rapid_StoreHash_LF75");
-    registerSuite<StringRapid_StoreHash_LF85>("Alp_String_Rapid_StoreHash_LF85");
-    registerSuite<StringRapid_StoreHash_LF90>("Alp_String_Rapid_StoreHash_LF90");
-
-    registerSuite<StringRapid_NoStoreHash_LF75>("Alp_String_Rapid_NoStoreHash_LF75");
-    registerSuite<StringRapid_NoStoreHash_LF85>("Alp_String_Rapid_NoStoreHash_LF85");
-    registerSuite<StringRapid_NoStoreHash_LF90>("Alp_String_Rapid_NoStoreHash_LF90");
+    registerProbingSuites<std::string,
+                          alp::RapidHasher,
+                          alp::IdentityHashPolicy,
+                          LF875,
+                          alp::NoStoreHashTag>("Alp_String_Rapid_NoStoreHash_LF875");
+    registerProbingSuites<std::string,
+                          alp::RapidHasher,
+                          alp::IdentityHashPolicy,
+                          LF85,
+                          alp::NoStoreHashTag>("Alp_String_Rapid_NoStoreHash_LF85");
+    registerProbingSuites<std::string,
+                          alp::RapidHasher,
+                          alp::IdentityHashPolicy,
+                          LF90,
+                          alp::NoStoreHashTag>("Alp_String_Rapid_NoStoreHash_LF90");
 
     benchmark::Initialize(&argc, argv);
     benchmark::RunSpecifiedBenchmarks();
