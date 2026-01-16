@@ -206,9 +206,7 @@ namespace
         registerSuite<Container<std::string>>(suiteName + "_String");
     }
 
-    template<typename Hash,
-             typename LoadFactorRatio,
-             typename ProbingScheme>
+    template<typename Hash, typename LoadFactorRatio, typename ProbingScheme>
     struct AlpSetBinder
     {
         template<typename T>
@@ -223,16 +221,14 @@ namespace
                               ProbingScheme>;
     };
 
-    template<typename Hash = alp::RapidHasher,
-             typename LoadFactorRatio = alp::DefaultLoadFactor>
+    template<typename Hash = alp::RapidHasher, typename LoadFactorRatio = alp::DefaultLoadFactor>
     void registerProbingSuites(std::string const& suiteName)
     {
-        registerSuites<AlpSetBinder<Hash, LoadFactorRatio, alp::LinearProbing>::
-                           template type>(suiteName + "_Linear");
+        registerSuites<AlpSetBinder<Hash, LoadFactorRatio, alp::LinearProbing>::template type>(
+            suiteName + "_Linear");
 
-        registerSuites<
-            AlpSetBinder<Hash, LoadFactorRatio, alp::QuadraticProbing>::
-                template type>(suiteName + "_Quadratic");
+        registerSuites<AlpSetBinder<Hash, LoadFactorRatio, alp::QuadraticProbing>::template type>(
+            suiteName + "_Quadratic");
     }
 
 }  // namespace
@@ -251,7 +247,7 @@ struct AdjustRatio
 };
 
 template<typename Ratio, int DeltaMillis>
-using AdjustRatio_t = typename AdjustRatio<Ratio, DeltaMillis>::type;
+using AdjustRatio_t = AdjustRatio<Ratio, DeltaMillis>::type;
 
 int main(int argc, char** argv)
 {

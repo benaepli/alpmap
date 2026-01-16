@@ -4,6 +4,7 @@ module;
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <string>
 #include <type_traits>
 
 #include "rapidhash.h"
@@ -46,15 +47,10 @@ namespace alp
             return rapidhash_withSeed(&key, sizeof(T), SEED);
         }
 
-        template<typename T>
-            requires(!std::is_trivially_copyable_v<T>) && requires(T t) {
-                { t.data() } -> std::convertible_to<void const*>;
-                { t.size() } -> std::convertible_to<std::size_t>;
-                typename T::value_type;
-            }
-        std::uint64_t operator()(T const& key) const noexcept
+        // Specialization for std::string
+        std::uint64_t operator()(std::string const& key) const noexcept
         {
-            return rapidhash_withSeed(key.data(), key.size() * sizeof(typename T::value_type), SEED);
+            return rapidhash_withSeed(key.data(), key.size() * sizeof(char), SEED);
         }
 
         // Fallback for types that are not trivially copyable and don't look like strings/containers

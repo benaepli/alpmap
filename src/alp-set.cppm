@@ -533,18 +533,24 @@ namespace alp
         Table()
             : alloc_()
             , byte_alloc_(alloc_)
+            , hasher_()
+            , equal_()
         {
         }
 
         explicit Table(Allocator const& alloc)
             : alloc_(alloc)
             , byte_alloc_(alloc_)
+            , hasher_()
+            , equal_()
         {
         }
 
         explicit Table(size_type capacity, Allocator const& alloc = Allocator())
             : alloc_(alloc)
             , byte_alloc_(alloc_)
+            , hasher_()
+            , equal_()
         {
             reserve(capacity);
         }
@@ -558,6 +564,8 @@ namespace alp
             , groups_(other.groups_)
             , alloc_(AllocTraits::select_on_container_copy_construction(other.alloc_))
             , byte_alloc_(alloc_)
+            , hasher_(other.hasher_)
+            , equal_(other.equal_)
         {
             if (other.buffer_ == nullptr)
             {
@@ -695,6 +703,8 @@ namespace alp
                 swap(alloc_, other.alloc_);
                 swap(byte_alloc_, other.byte_alloc_);
             }
+            swap(hasher_, other.hasher_);
+            swap(equal_, other.equal_);
             swap(buffer_, other.buffer_);
             swap(ctrl_, other.ctrl_);
             swap(slots_, other.slots_);
@@ -711,8 +721,7 @@ namespace alp
                 return ctrlLen_;
             }
 
-            auto h = Hash {};
-            auto hash = Policy::apply(h(key));
+            auto hash = Policy::apply(hasher_(key));
             size_t mask = groups_ - 1;
             auto group = h1(hash) & mask;  // Since groups_ is a power of 2
             auto h2Val = h2(hash);
@@ -723,7 +732,7 @@ namespace alp
                 Group<Backend> g {ctrl_ + group * LANE_COUNT};
                 for (int i : g.match(h2Val))
                 {
-                    if (Equal {}(key, *slots_[group * LANE_COUNT + i].element())) [[likely]]
+                    if (equal_(key, *slots_[group * LANE_COUNT + i].element())) [[likely]]
                     {
                         return group * LANE_COUNT + i;
                     }
@@ -762,7 +771,7 @@ namespace alp
                     auto slotNumber = baseSlot + i;
                     T const& result = *slots_[slotNumber].element();
 
-                    if (Equal {}(result, value))
+                    if (equal_(result, value))
                     {
                         return {slotNumber, false};
                     }
@@ -802,7 +811,7 @@ namespace alp
             T* temp =
                 std::construct_at(reinterpret_cast<T*>(tempStorage), std::forward<Args>(args)...);
 
-            auto hash = Policy::apply(Hash {}(*temp));
+            auto hash = Policy::apply(hasher_(*temp));
             auto result = emplace_internal(*temp, hash);
 
             temp->~T();
@@ -867,7 +876,7 @@ namespace alp
             }
             else
             {
-                return Policy::apply(Hash {}(*slot.element()));
+                return Policy::apply(hasher_(*slot.element()));
             }
         }
 
@@ -897,6 +906,8 @@ namespace alp
         size_t groups_ = 0;
         [[no_unique_address]] Allocator alloc_;
         [[no_unique_address]] ByteAlloc byte_alloc_;  // Rebound allocator for buffer
+        [[no_unique_address]] Hash hasher_;
+        [[no_unique_address]] Equal equal_;
         std::byte* buffer_ = nullptr;  // Single co-located allocation
         ctrl_t* ctrl_ = nullptr;  // Points into buffer_
         Slot<T, HashStoragePolicy>* slots_ = nullptr;  // Points into buffer_ after ctrl

@@ -85,6 +85,335 @@ struct std::hash<ThrowsOnCopy>
     size_t operator()(ThrowsOnCopy const& t) const noexcept { return std::hash<int> {}(t.value); }
 };
 
+// Set configurations for typed tests
+using SetLinearProbing = alp::Set<int,
+                                  std::hash<int>,
+                                  std::equal_to<int>,
+                                  alp::MixHashPolicy,
+                                  alp::DefaultBackend,
+                                  std::allocator<std::byte>,
+                                  std::ratio<7, 8>,
+                                  alp::StoreHashTag,
+                                  alp::LinearProbing>;
+
+using SetQuadraticProbing = alp::Set<int,
+                                     std::hash<int>,
+                                     std::equal_to<int>,
+                                     alp::MixHashPolicy,
+                                     alp::DefaultBackend,
+                                     std::allocator<std::byte>,
+                                     std::ratio<7, 8>,
+                                     alp::StoreHashTag,
+                                     alp::QuadraticProbing>;
+
+using SetIdentityPolicy =
+    alp::Set<int, std::hash<int>, std::equal_to<int>, alp::IdentityHashPolicy>;
+
+using SetNoHashStorage = alp::Set<int,
+                                  std::hash<int>,
+                                  std::equal_to<int>,
+                                  alp::MixHashPolicy,
+                                  alp::DefaultBackend,
+                                  std::allocator<std::byte>,
+                                  std::ratio<7, 8>,
+                                  alp::NoStoreHashTag>;
+
+template<typename T>
+class SetTypedTest : public ::testing::Test
+{
+};
+
+using SetTypes =
+    ::testing::Types<SetLinearProbing, SetQuadraticProbing, SetIdentityPolicy, SetNoHashStorage>;
+
+TYPED_TEST_SUITE(SetTypedTest, SetTypes);
+
+TYPED_TEST(SetTypedTest, BasicInsertAndContains)
+{
+    TypeParam s;
+    s.emplace(42);
+    EXPECT_EQ(s.size(), 1);
+    EXPECT_TRUE(s.contains(42));
+    EXPECT_FALSE(s.contains(999));
+}
+
+TYPED_TEST(SetTypedTest, DuplicatePrevention)
+{
+    TypeParam s;
+    auto [it1, inserted1] = s.emplace(42);
+    auto [it2, inserted2] = s.emplace(42);
+    EXPECT_TRUE(inserted1);
+    EXPECT_FALSE(inserted2);
+    EXPECT_EQ(s.size(), 1);
+}
+
+TYPED_TEST(SetTypedTest, RehashPreservesElements)
+{
+    TypeParam s;
+    for (int i = 0; i < 100; ++i)
+    {
+        s.emplace(i);
+    }
+    EXPECT_EQ(s.size(), 100);
+    for (int i = 0; i < 100; ++i)
+    {
+        EXPECT_TRUE(s.contains(i));
+    }
+}
+
+TYPED_TEST(SetTypedTest, EraseAndReinsert)
+{
+    TypeParam s;
+    for (int i = 0; i < 20; ++i)
+    {
+        s.emplace(i);
+    }
+    for (int i = 0; i < 20; i += 2)
+    {
+        s.erase(i);
+    }
+    for (int i = 1; i < 20; i += 2)
+    {
+        EXPECT_TRUE(s.contains(i));
+    }
+    for (int i = 0; i < 20; i += 2)
+    {
+        EXPECT_FALSE(s.contains(i));
+    }
+    // Reinsert
+    for (int i = 0; i < 20; i += 2)
+    {
+        s.emplace(i);
+    }
+    for (int i = 0; i < 20; ++i)
+    {
+        EXPECT_TRUE(s.contains(i));
+    }
+}
+
+TYPED_TEST(SetTypedTest, Iteration)
+{
+    TypeParam s;
+    for (int i = 0; i < 50; ++i)
+    {
+        s.emplace(i);
+    }
+    std::vector<int> found;
+    for (auto const& val : s)
+    {
+        found.push_back(val);
+    }
+    std::sort(found.begin(), found.end());
+    EXPECT_EQ(found.size(), 50);
+    for (int i = 0; i < 50; ++i)
+    {
+        EXPECT_EQ(found[i], i);
+    }
+}
+
+TYPED_TEST(SetTypedTest, EraseByIterator)
+{
+    TypeParam s;
+    s.emplace(1);
+    s.emplace(2);
+    s.emplace(3);
+    EXPECT_EQ(s.size(), 3);
+    auto it = s.find(2);
+    EXPECT_NE(it, s.end());
+    s.erase(it);
+    EXPECT_EQ(s.size(), 2);
+    EXPECT_FALSE(s.contains(2));
+    EXPECT_TRUE(s.contains(1));
+    EXPECT_TRUE(s.contains(3));
+}
+
+TYPED_TEST(SetTypedTest, EraseByKey)
+{
+    TypeParam s;
+    s.emplace(10);
+    s.emplace(20);
+    s.emplace(30);
+    size_t erased = s.erase(20);
+    EXPECT_EQ(erased, 1);
+    EXPECT_EQ(s.size(), 2);
+    EXPECT_FALSE(s.contains(20));
+    erased = s.erase(999);
+    EXPECT_EQ(erased, 0);
+    EXPECT_EQ(s.size(), 2);
+}
+
+TYPED_TEST(SetTypedTest, TryEraseSuccess)
+{
+    TypeParam s;
+    s.emplace(42);
+    auto result = s.tryErase(42);
+    EXPECT_TRUE(result.has_value());
+    EXPECT_FALSE(s.contains(42));
+}
+
+TYPED_TEST(SetTypedTest, TryEraseFail)
+{
+    TypeParam s;
+    s.emplace(42);
+    auto result = s.tryErase(999);
+    EXPECT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), alp::Error::NotFound);
+    EXPECT_TRUE(s.contains(42));
+}
+
+TYPED_TEST(SetTypedTest, ClearAndEmpty)
+{
+    TypeParam s;
+    for (int i = 0; i < 100; ++i)
+    {
+        s.emplace(i);
+    }
+    EXPECT_EQ(s.size(), 100);
+    EXPECT_FALSE(s.empty());
+    s.clear();
+    EXPECT_TRUE(s.empty());
+    EXPECT_EQ(s.size(), 0);
+}
+
+TYPED_TEST(SetTypedTest, GroupBoundaryCross)
+{
+    // 17 elements forces crossing into a second group
+    TypeParam s;
+    for (int i = 0; i < 17; ++i)
+    {
+        s.emplace(i);
+    }
+    EXPECT_EQ(s.size(), 17);
+    for (int i = 0; i < 17; ++i)
+    {
+        EXPECT_TRUE(s.contains(i)) << "Missing element: " << i;
+    }
+    std::vector<int> found;
+    for (auto it = s.begin(); it != s.end(); ++it)
+    {
+        found.push_back(*it);
+    }
+    EXPECT_EQ(found.size(), 17);
+}
+
+TYPED_TEST(SetTypedTest, SparseIteration)
+{
+    TypeParam s;
+    for (int i = 0; i < 20; ++i)
+    {
+        s.emplace(i);
+    }
+    for (int i = 0; i < 20; i += 2)
+    {
+        s.erase(i);
+    }
+    std::vector<int> found;
+    for (auto it = s.begin(); it != s.end(); ++it)
+    {
+        found.push_back(*it);
+    }
+    EXPECT_EQ(found.size(), 10);
+    std::sort(found.begin(), found.end());
+    for (int i = 0; i < 10; ++i)
+    {
+        EXPECT_EQ(found[i], 2 * i + 1);
+    }
+}
+
+TYPED_TEST(SetTypedTest, EmptySetIteration)
+{
+    TypeParam s;
+    EXPECT_EQ(s.begin(), s.end());
+    s.emplace(1);
+    s.clear();
+    EXPECT_EQ(s.begin(), s.end());
+}
+
+TYPED_TEST(SetTypedTest, ConstIteration)
+{
+    TypeParam s;
+    for (int i = 0; i < 5; ++i)
+    {
+        s.emplace(i);
+    }
+    TypeParam const& cs = s;
+    int count = 0;
+    for (auto it = cs.begin(); it != cs.end(); ++it)
+    {
+        ++count;
+    }
+    EXPECT_EQ(count, 5);
+}
+
+TYPED_TEST(SetTypedTest, ReserveDoesNotShrink)
+{
+    TypeParam s;
+    s.reserve(1000);
+    s.emplace(1);
+    s.emplace(2);
+    s.reserve(10);
+    EXPECT_TRUE(s.contains(1));
+    EXPECT_TRUE(s.contains(2));
+}
+
+TYPED_TEST(SetTypedTest, GetSuccess)
+{
+    TypeParam s;
+    s.emplace(42);
+    auto result = s.get(42);
+    EXPECT_TRUE(result.has_value());
+    EXPECT_EQ(result.value().get(), 42);
+}
+
+TYPED_TEST(SetTypedTest, GetFail)
+{
+    TypeParam s;
+    s.emplace(42);
+    auto result = s.get(999);
+    EXPECT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), alp::Error::NotFound);
+}
+
+TYPED_TEST(SetTypedTest, LargeScale)
+{
+    TypeParam s;
+    for (int i = 0; i < 10000; ++i)
+    {
+        s.emplace(i);
+    }
+    EXPECT_EQ(s.size(), 10000);
+    for (int i = 0; i < 10000; i += 100)
+    {
+        EXPECT_TRUE(s.contains(i));
+    }
+    for (int i = 0; i < 10000; i += 2)
+    {
+        s.erase(i);
+    }
+    EXPECT_EQ(s.size(), 5000);
+    for (int i = 1; i < 10000; i += 2)
+    {
+        EXPECT_TRUE(s.contains(i));
+    }
+}
+
+TYPED_TEST(SetTypedTest, SingleElement)
+{
+    TypeParam s;
+    s.emplace(42);
+    EXPECT_EQ(s.size(), 1);
+    EXPECT_TRUE(s.contains(42));
+    auto it = s.begin();
+    EXPECT_NE(it, s.end());
+    EXPECT_EQ(*it, 42);
+    ++it;
+    EXPECT_EQ(it, s.end());
+}
+
+// =============================================================================
+// Regular Tests (type-specific tests that can't be parametrized)
+// =============================================================================
+
 TEST(SetCore, BasicOperationsInt)
 {
     alp::Set<int> s;
