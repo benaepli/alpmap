@@ -10,12 +10,6 @@
         "CMAKE_C_COMPILER": "clang",
         "CMAKE_CXX_COMPILER": "clang++"
       }
-    },
-    {
-      "name": "conan",
-      "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build",
-      "toolchainFile": "${sourceDir}/build/conan_toolchain.cmake"
     }
   ]
 }

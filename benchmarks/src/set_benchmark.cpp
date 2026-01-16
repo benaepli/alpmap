@@ -199,44 +199,63 @@ namespace
         registerWithRange("Iterate", bmIterate<Container>);
     }
 
-    template<typename T,
-             typename Hash = alp::RapidHasher,
-             typename Policy = alp::HashPolicySelector<T, Hash>::type,
-             typename LoadFactorRatio = alp::DefaultLoadFactor,
-             typename HashStoragePolicy = alp::DefaultHashStoragePolicy>
+    template<template<typename...> typename Container>
+    void registerSuites(std::string const& suiteName)
+    {
+        registerSuite<Container<int64_t>>(suiteName + "_Int64");
+        registerSuite<Container<std::string>>(suiteName + "_String");
+    }
+
+    template<typename Hash,
+             typename LoadFactorRatio,
+             typename ProbingScheme>
+    struct AlpSetBinder
+    {
+        template<typename T>
+        using type = alp::Set<T,
+                              Hash,
+                              std::equal_to<T>,
+                              typename alp::HashPolicySelector<T, Hash>::type,
+                              alp::DefaultBackend,
+                              std::allocator<std::byte>,
+                              LoadFactorRatio,
+                              alp::HashStorageSelector<T>,
+                              ProbingScheme>;
+    };
+
+    template<typename Hash = alp::RapidHasher,
+             typename LoadFactorRatio = alp::DefaultLoadFactor>
     void registerProbingSuites(std::string const& suiteName)
     {
-        registerSuite<alp::Set<T,
-                               Hash,
-                               std::equal_to<T>,
-                               Policy,
-                               alp::DefaultBackend,
-                               std::allocator<std::byte>,
-                               LoadFactorRatio,
-                               HashStoragePolicy,
-                               alp::LinearProbing>>(suiteName + "_Linear");
-        registerSuite<alp::Set<T,
-                               Hash,
-                               std::equal_to<T>,
-                               Policy,
-                               alp::DefaultBackend,
-                               std::allocator<std::byte>,
-                               LoadFactorRatio,
-                               HashStoragePolicy,
-                               alp::QuadraticProbing>>(suiteName + "_Quadratic");
+        registerSuites<AlpSetBinder<Hash, LoadFactorRatio, alp::LinearProbing>::
+                           template type>(suiteName + "_Linear");
+
+        registerSuites<
+            AlpSetBinder<Hash, LoadFactorRatio, alp::QuadraticProbing>::
+                template type>(suiteName + "_Quadratic");
     }
 
 }  // namespace
 
+// Helper to adjust load factor by a delta (in units of 0.001)
+template<typename Ratio, int DeltaMillis>
+struct AdjustRatio
+{
+    static constexpr long long newNum = static_cast<long long>(Ratio::num) * 1000
+        + static_cast<long long>(Ratio::den) * DeltaMillis;
+    static constexpr long long newDen = static_cast<long long>(Ratio::den) * 1000;
+
+    static constexpr long long gcd_val = std::gcd(newNum > 0 ? newNum : -newNum, newDen);
+
+    using type = std::ratio<newNum / gcd_val, newDen / gcd_val>;
+};
+
+template<typename Ratio, int DeltaMillis>
+using AdjustRatio_t = typename AdjustRatio<Ratio, DeltaMillis>::type;
+
 int main(int argc, char** argv)
 {
     benchmark::MaybeReenterWithoutASLR(argc, argv);
-
-    registerProbingSuites<int64_t>("Alp_Int64_Rapid");
-    registerProbingSuites<std::string>("Alp_String_Rapid");
-
-    registerProbingSuites<int64_t, std::hash<int64_t>>("Alp_Int64_StdHash");
-    registerProbingSuites<std::string, std::hash<std::string>>("Alp_String_StdHash");
 
     registerSuite<std::unordered_set<int64_t>>("Std_UnorderedSet_Int64");
     registerSuite<std::unordered_set<std::string>>("Std_UnorderedSet_String");
@@ -244,42 +263,13 @@ int main(int argc, char** argv)
     registerSuite<absl::flat_hash_set<int64_t>>("Absl_FlatHashSet_Int64");
     registerSuite<absl::flat_hash_set<std::string>>("Absl_FlatHashSet_String");
 
-    // Load Factor Benchmarks (87.5%, 85%, 90%)
-    using LF875 = std::ratio<7, 8>;
-    using LF85 = std::ratio<17, 20>;
-    using LF90 = std::ratio<9, 10>;
+    using DefaultBackendLF = alp::DynamicLoadFactorSelector<alp::DefaultBackend>::type;
+    using DefaultLF_Minus = AdjustRatio_t<DefaultBackendLF, -25>;  // Default - 0.025
+    using DefaultLF_Plus = AdjustRatio_t<DefaultBackendLF, 25>;  // Default + 0.025
 
-    registerProbingSuites<std::string,
-                          alp::RapidHasher,
-                          alp::IdentityHashPolicy,
-                          LF875,
-                          alp::StoreHashTag>("Alp_String_Rapid_StoreHash_LF875");
-    registerProbingSuites<std::string,
-                          alp::RapidHasher,
-                          alp::IdentityHashPolicy,
-                          LF85,
-                          alp::StoreHashTag>("Alp_String_Rapid_StoreHash_LF85");
-    registerProbingSuites<std::string,
-                          alp::RapidHasher,
-                          alp::IdentityHashPolicy,
-                          LF90,
-                          alp::StoreHashTag>("Alp_String_Rapid_StoreHash_LF90");
-
-    registerProbingSuites<std::string,
-                          alp::RapidHasher,
-                          alp::IdentityHashPolicy,
-                          LF875,
-                          alp::NoStoreHashTag>("Alp_String_Rapid_NoStoreHash_LF875");
-    registerProbingSuites<std::string,
-                          alp::RapidHasher,
-                          alp::IdentityHashPolicy,
-                          LF85,
-                          alp::NoStoreHashTag>("Alp_String_Rapid_NoStoreHash_LF85");
-    registerProbingSuites<std::string,
-                          alp::RapidHasher,
-                          alp::IdentityHashPolicy,
-                          LF90,
-                          alp::NoStoreHashTag>("Alp_String_Rapid_NoStoreHash_LF90");
+    registerProbingSuites<alp::RapidHasher, DefaultBackendLF>("Alp_Rapid_LF_Default");
+    registerProbingSuites<alp::RapidHasher, DefaultLF_Minus>("Alp_Rapid_LF_Minus025");
+    registerProbingSuites<alp::RapidHasher, DefaultLF_Plus>("Alp_Rapid_LF_Plus025");
 
     benchmark::Initialize(&argc, argv);
     benchmark::RunSpecifiedBenchmarks();

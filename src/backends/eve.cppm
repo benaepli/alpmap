@@ -12,16 +12,14 @@ namespace alp
 {
     /// SIMD backend implementation using the EVE library.
     /// Provides zero-cost abstraction over EVE SIMD operations.
-    export struct EveBackend
+    export template<std::size_t MaxGroupSize = eve::expected_cardinal_v<std::uint8_t>>
+    struct EveBackend
     {
         // Determine lane count (capped at 64 to fit in uint64_t bitmask)
-        static constexpr std::size_t max_size = 64;
-        static constexpr auto native_size = eve::expected_cardinal_v<std::uint8_t>;
-        static constexpr auto capped_size =
-            std::min(native_size, static_cast<std::ptrdiff_t>(max_size));
+        static constexpr std::size_t max_size = std::min(MaxGroupSize, 64uz);
 
         // SIMD types
-        using ctrl_simd = eve::wide<std::uint8_t, eve::fixed<capped_size>>;
+        using ctrl_simd = eve::wide<std::uint8_t, eve::fixed<max_size>>;
         using ctrl_mask = eve::logical<ctrl_simd>;
 
         // Backend interface types
@@ -57,7 +55,10 @@ namespace alp
         static Mask match(Register reg, std::uint8_t val) noexcept { return reg == ctrl_simd(val); }
 
         /// Match all lanes marked as empty (0x80).
-        static Mask matchEmpty(Register reg) noexcept { return reg == static_cast<std::uint8_t>(0x80); }
+        static Mask matchEmpty(Register reg) noexcept
+        {
+            return reg == static_cast<std::uint8_t>(0x80);
+        }
 
         /// Match all lanes that contain a value (not empty, deleted, or sentinel).
         static Mask matchFull(Register reg) noexcept
@@ -74,7 +75,10 @@ namespace alp
         static std::optional<int> firstTrue(Mask mask) noexcept { return eve::first_true(mask); }
 
         /// Convert a SIMD mask to a scalar bitmask for iteration.
-        static Iterable iterate(Mask mask) noexcept { return Iterable {eve::top_bits {mask}.as_int()}; }
+        static Iterable iterate(Mask mask) noexcept
+        {
+            return Iterable {eve::top_bits {mask}.as_int()};
+        }
 
         static std::optional<int> nextTrue(Mask mask, size_t nextIndex) noexcept
         {

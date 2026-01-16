@@ -75,7 +75,7 @@ namespace alp
                     typename Policy = HashPolicySelector<Key, Hash>::type,
                     SimdBackend Backend = DefaultBackend,
                     typename Allocator = std::allocator<std::byte>,
-                    typename LoadFactorRatio = DefaultLoadFactor,
+                    typename LoadFactorRatio = typename DefaultLoadFactorSelector<Backend>::type,
                     typename HashStoragePolicy = typename HashStorageSelector<std::pair<Key const, Value>>::type>
         requires std::move_constructible<std::pair<Key const, Value>>
     class Map

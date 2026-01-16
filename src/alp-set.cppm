@@ -51,7 +51,7 @@ namespace alp
     };
 
 #if defined(ALP_USE_EVE)
-    export using DefaultBackend = EveBackend;
+    export using DefaultBackend = EveBackend<>;  // Use default template argument
 #else
     export using DefaultBackend = SseBackend;
 #endif
@@ -78,8 +78,6 @@ namespace alp
     struct NoStoreHashTag
     {
     };
-
-    using DefaultHashStoragePolicy = NoStoreHashTag;
 
     export template<typename T>
     struct HashStorageSelector
@@ -297,7 +295,6 @@ namespace alp
     // Export hash storage policy tags
     export using StoreHashTag = StoreHashTag;
     export using NoStoreHashTag = NoStoreHashTag;
-    export using DefaultHashStoragePolicy = DefaultHashStoragePolicy;
 
     /// Forward declaration of the Table base class.
     export template<typename T,
@@ -458,6 +455,42 @@ namespace alp
     /// 7/8 = 0.875 provides a good balance between memory usage and probe length.
     export using DefaultLoadFactor = std::ratio<7, 8>;
 
+    /// Select load factor based purely on GroupSize (backend-agnostic).
+    /// Larger groups can handle higher load factors efficiently.
+    /// - GroupSize=64: 0.95 (19/20) - AVX-512, checks 64 slots per operation
+    /// - GroupSize=32: 0.9375 (15/16) - AVX2, balanced for 32-byte groups
+    /// - GroupSize=16 or other: 0.875 (7/8) - SSE and conservative default
+    export template<std::size_t GroupSize>
+    struct GroupSizeLoadFactorSelector
+    {
+        using type = std::conditional_t<GroupSize == 64,
+                                        std::ratio<19, 20>,  // 0.95
+                                        std::conditional_t<GroupSize == 32,
+                                                           std::ratio<15, 16>,  // 0.9375
+                                                           std::ratio<7, 8>  // 0.875 (fallback)
+                                                           >>;
+    };
+
+    /// Fixed load factor selector - always returns the specified ratio.
+    /// Use when you want explicit control over load factor.
+    export template<typename Ratio>
+    struct FixedLoadFactorSelector
+    {
+        using type = Ratio;
+    };
+
+    /// Dynamic load factor selector - selects based on backend's GroupSize.
+    /// Use for automatic optimization based on SIMD width.
+    export template<SimdBackend Backend>
+    struct DynamicLoadFactorSelector
+    {
+        using type = typename GroupSizeLoadFactorSelector<Backend::GroupSize>::type;
+    };
+
+    /// Default selector: dynamic selection based on backend characteristics
+    export template<SimdBackend Backend>
+    using DefaultLoadFactorSelector = DynamicLoadFactorSelector<Backend>;
+
     /// Concept: allocator that can be safely swapped without causing UB.
     /// Swap is safe if allocators propagate on swap or are always equal.
     template<typename Alloc>
@@ -474,8 +507,8 @@ namespace alp
              typename Policy,
              SimdBackend Backend,
              typename Allocator = std::allocator<std::byte>,
-             typename LoadFactorRatio = DefaultLoadFactor,
-             typename HashStoragePolicy = DefaultHashStoragePolicy,
+             typename LoadFactorRatio = DefaultLoadFactorSelector<Backend>::type,
+             typename HashStoragePolicy = HashStorageSelector<T>::type,
              typename Prober = DefaultProber>
     class Table
     {
@@ -957,6 +990,7 @@ namespace alp
             ctrlLen_ = count;
             capacity_ = newCapacity;
             groups_ = newGroupCount;
+            used_ = size_;
         }
 
         /// Allocates a combined buffer for ctrl + slots using the allocator.
@@ -985,7 +1019,7 @@ namespace alp
                     typename Policy = HashPolicySelector<T, Hash>::type,
                     SimdBackend Backend = DefaultBackend,
                     typename Allocator = std::allocator<std::byte>,
-                    typename LoadFactorRatio = DefaultLoadFactor,
+                    typename LoadFactorRatio = typename DefaultLoadFactorSelector<Backend>::type,
                     typename HashStoragePolicy = typename HashStorageSelector<T>::type,
                     typename Prober = DefaultProber>
         requires std::move_constructible<T>
