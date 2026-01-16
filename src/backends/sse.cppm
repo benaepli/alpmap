@@ -26,44 +26,44 @@ namespace alp
             struct Iterator
             {
                 BitMask bits;
-                int operator*() const { return std::countr_zero(bits); }
-                Iterator& operator++()
+                int operator*() const noexcept { return std::countr_zero(bits); }
+                Iterator& operator++() noexcept
                 {
                     bits &= (bits - 1);
                     return *this;
                 }
-                bool operator!=(Iterator const& other) const { return bits != other.bits; }
+                bool operator!=(Iterator const& other) const noexcept { return bits != other.bits; }
             };
 
-            Iterator begin() const { return {bits}; }
-            Iterator end() const { return {0}; }
+            Iterator begin() const noexcept { return {bits}; }
+            Iterator end() const noexcept { return {0}; }
         };
 
-        static Register load(std::uint8_t const* ptr)
+        static Register load(std::uint8_t const* ptr) noexcept
         {
             return _mm_loadu_si128(reinterpret_cast<Register const*>(ptr));
         }
 
-        static Mask match(Register reg, std::uint8_t val)
+        static Mask match(Register reg, std::uint8_t val) noexcept
         {
             auto matched = _mm_cmpeq_epi8(reg, _mm_set1_epi8(val));
             return static_cast<Mask>(_mm_movemask_epi8(matched));
         }
 
-        static Mask matchEmpty(Register reg)
+        static Mask matchEmpty(Register reg) noexcept
         {
             auto matched = _mm_cmpeq_epi8(reg, _mm_set1_epi8(static_cast<char>(0x80)));
             return static_cast<Mask>(_mm_movemask_epi8(matched));
         }
 
-        static Mask matchFull(Register reg)
+        static Mask matchFull(Register reg) noexcept
         {
             return (~static_cast<Mask>(_mm_movemask_epi8(reg))) & 0xFFFF;
         }
 
-        static bool any(Mask mask) { return mask != 0; }
+        static bool any(Mask mask) noexcept { return mask != 0; }
 
-        static std::optional<int> firstTrue(Mask mask)
+        static std::optional<int> firstTrue(Mask mask) noexcept
         {
             if (mask == 0)
             {
@@ -72,9 +72,9 @@ namespace alp
             return std::countr_zero(mask);
         }
 
-        static Iterable iterate(Mask mask) { return Iterable{mask}; }
+        static Iterable iterate(Mask mask) noexcept { return Iterable{mask}; }
 
-        static std::optional<int> nextTrue(Mask mask, size_t offset)
+        static std::optional<int> nextTrue(Mask mask, size_t offset) noexcept
         {
             BitMask bits = mask & (~0U << offset);
 
@@ -85,6 +85,6 @@ namespace alp
             return std::countr_zero(bits);
         }
 
-        static BitMask toBits(Mask mask) { return mask; }
+        static BitMask toBits(Mask mask) noexcept { return mask; }
     };
 }  // namespace alp

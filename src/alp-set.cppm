@@ -81,13 +81,26 @@ namespace alp
 
     using DefaultHashStoragePolicy = NoStoreHashTag;
 
+    export template<typename T>
+    struct HashStorageSelector
+    {
+        using type = StoreHashTag;
+    };
+
+    export template<typename T>
+        requires std::is_trivially_copyable_v<T>
+    struct HashStorageSelector<T>
+    {
+        using type = NoStoreHashTag;
+    };
+
     export struct LinearProbing
     {
         size_t seq = 0;
 
-        explicit LinearProbing(size_t /*startGroup*/) {}
+        explicit LinearProbing(size_t /*startGroup*/) noexcept {}
 
-        inline size_t nextGroup(size_t currentGroup, size_t mask)
+        inline size_t nextGroup(size_t currentGroup, size_t mask) noexcept
         {
             return (currentGroup + 1) & mask;
         }
@@ -97,9 +110,9 @@ namespace alp
     {
         size_t seq = 0;
 
-        explicit QuadraticProbing(size_t /*startGroup*/) {}
+        explicit QuadraticProbing(size_t /*startGroup*/) noexcept {}
 
-        inline size_t nextGroup(size_t currentGroup, size_t mask)
+        inline size_t nextGroup(size_t currentGroup, size_t mask) noexcept
         {
             seq++;
             return (currentGroup + seq) & mask;
@@ -250,35 +263,35 @@ namespace alp
         Register data;
 
         /// Constructs a Group by loading control bytes from memory.
-        explicit Group(ctrl_t const* ctrl)
+        explicit Group(ctrl_t const* ctrl) noexcept
             : data(Backend::load(ctrl))
         {
         }
 
         /// Returns an iterator over all slots in the group of slots
         /// whose control hash matches.
-        Backend::Iterable match(std::uint8_t h2) const
+        Backend::Iterable match(std::uint8_t h2) const noexcept
         {
             return Backend::iterate(Backend::match(data, h2));
         }
 
         /// Returns a mask of all slots in the group that contain a value.
         /// (Not empty, deleted, or sentinel)
-        Mask matchFull() const { return Backend::matchFull(data); }
+        Mask matchFull() const noexcept { return Backend::matchFull(data); }
 
-        Mask matchEmpty() const { return Backend::matchEmpty(data); }
+        Mask matchEmpty() const noexcept { return Backend::matchEmpty(data); }
 
         /// Returns true if and only if there exists a slot in the group that has Ctrl::Empty.
-        bool anyEmpty() const { return Backend::any(matchEmpty()); }
+        bool anyEmpty() const noexcept { return Backend::any(matchEmpty()); }
 
         /// Returns true if we've reached the sentinel at the end of the control array.
-        bool atEnd() const
+        bool atEnd() const noexcept
         {
             return Backend::any(Backend::match(data, static_cast<ctrl_t>(Ctrl::Sentinel)));
         }
 
         /// Returns true if and only if there exists a slot that isn't empty, deleted, or sentinel.
-        bool hasValue() const { return Backend::any(matchFull()); }
+        bool hasValue() const noexcept { return Backend::any(matchFull()); }
     };
 
     // Export hash storage policy tags
@@ -338,10 +351,10 @@ namespace alp
             return lhs.ctrl == rhs.ctrl;
         }
 
-        T& operator*() const { return *slot->element(); }
-        T* operator->() const { return slot->element(); }
+        T& operator*() const noexcept { return *slot->element(); }
+        T* operator->() const noexcept { return slot->element(); }
 
-        SetIterator& operator++()
+        SetIterator& operator++() noexcept
         {
             ++ctrl;
             ++slot;
@@ -356,9 +369,9 @@ namespace alp
 
       private:
         /// Returns true if the current slot contains an element.
-        static bool isFull(ctrl_t ctrl) { return (ctrl & 0x80) == 0; }
+        static bool isFull(ctrl_t ctrl) noexcept { return (ctrl & 0x80) == 0; }
 
-        [[nodiscard]] ctrl_t* alignedGroup() const
+        [[nodiscard]] ctrl_t* alignedGroup() const noexcept
         {
             // We align down to LANE_COUNT boundary.
             // Note: ctrl_t is 1 byte, so address arithmetic works directly.
@@ -367,13 +380,13 @@ namespace alp
             return reinterpret_cast<ctrl_t*>(alignedAddr);
         }
 
-        [[nodiscard]] int groupOffset() const
+        [[nodiscard]] int groupOffset() const noexcept
         {
             auto addr = reinterpret_cast<uintptr_t>(ctrl);
             return static_cast<int>(addr & (LANE_COUNT - 1));
         }
 
-        SetIterator& skipEmptySlots()
+        SetIterator& skipEmptySlots() noexcept
         {
             // First pass: possibly unaligned.
             auto* groupPtr = alignedGroup();
@@ -398,14 +411,14 @@ namespace alp
             int jumpToNext = LANE_COUNT - offset;
             ctrl += jumpToNext;
             slot += jumpToNext;
-            if (g.atEnd())
+            if (g.atEnd()) [[unlikely]]
             {
                 return *this;
             }
             return skipEmptySlotsAligned();
         }
 
-        SetIterator& skipEmptySlotsAligned()
+        SetIterator& skipEmptySlotsAligned() noexcept
         {
             while (true)
             {
@@ -422,7 +435,7 @@ namespace alp
 
                 ctrl += LANE_COUNT;
                 slot += LANE_COUNT;
-                if (g.atEnd())
+                if (g.atEnd()) [[unlikely]]
                 {
                     return *this;
                 }
@@ -576,7 +589,7 @@ namespace alp
             return *this;
         }
 
-        ~Table() { clear(); }
+        ~Table() noexcept { clear(); }
 
       public:
         iterator begin()
@@ -609,11 +622,18 @@ namespace alp
         {
             if (buffer_ != nullptr)
             {
-                for (size_t i = 0; i < capacity_; ++i)
+                if constexpr (!std::is_trivially_destructible_v<T>)
                 {
-                    if ((ctrl_[i] & 0x80) == 0)
+                    for (size_t gIdx = 0; gIdx < groups_; ++gIdx)
                     {
-                        AllocTraits::destroy(alloc_, slots_[i].element());
+                        Group<Backend> g {ctrl_ + gIdx * LANE_COUNT};
+                        auto fullMask = g.matchFull();
+
+                        for (int i : Backend::iterate(fullMask))
+                        {
+                            size_t idx = gIdx * LANE_COUNT + i;
+                            AllocTraits::destroy(alloc_, slots_[idx].element());
+                        }
                     }
                 }
                 deallocateBuffer(buffer_, ctrlLen_, capacity_);
@@ -670,12 +690,12 @@ namespace alp
                 Group<Backend> g {ctrl_ + group * LANE_COUNT};
                 for (int i : g.match(h2Val))
                 {
-                    if (Equal {}(key, *slots_[group * LANE_COUNT + i].element()))
+                    if (Equal {}(key, *slots_[group * LANE_COUNT + i].element())) [[likely]]
                     {
                         return group * LANE_COUNT + i;
                     }
                 }
-                if (g.anyEmpty())
+                if (g.anyEmpty()) [[likely]]
                 {
                     return ctrlLen_;
                 }
@@ -779,7 +799,10 @@ namespace alp
         /// Marks the slot as deleted or empty based on group state.
         void erase_slot(size_t offset)
         {
-            AllocTraits::destroy(alloc_, slots_[offset].element());
+            if constexpr (!std::is_trivially_destructible_v<T>)
+            {
+                AllocTraits::destroy(alloc_, slots_[offset].element());
+            }
             --size_;
 
             auto addr = reinterpret_cast<uintptr_t>(ctrl_ + offset);
@@ -798,9 +821,9 @@ namespace alp
         }
 
         /// Extracts the upper bits for group selection.
-        static constexpr size_t h1(size_t hash) { return hash >> 7; }
+        static constexpr size_t h1(size_t hash) noexcept { return hash >> 7; }
         /// Extracts the lower 7 bits for control byte matching.
-        static constexpr ctrl_t h2(size_t hash) { return hash & 0x7F; }
+        static constexpr ctrl_t h2(size_t hash) noexcept { return hash & 0x7F; }
 
         /// Get hash value (stored or recomputed)
         [[nodiscard]] size_t getSlotHash(Slot<T, HashStoragePolicy> const& slot) const
@@ -816,7 +839,7 @@ namespace alp
         }
 
         /// Store hash if policy requires
-        void setSlotHash(Slot<T, HashStoragePolicy>& slot, size_t hash)
+        void setSlotHash(Slot<T, HashStoragePolicy>& slot, size_t hash) noexcept
         {
             if constexpr (std::is_same_v<HashStoragePolicy, StoreHashTag>)
             {
@@ -825,8 +848,8 @@ namespace alp
             // NoStoreHashTag: no-op, optimized away by compiler
         }
 
-        iterator iteratorAt(size_t offset) { return {ctrl_ + offset, slots_ + offset}; }
-        const_iterator iteratorAt(size_t offset) const
+        iterator iteratorAt(size_t offset) noexcept { return {ctrl_ + offset, slots_ + offset}; }
+        const_iterator iteratorAt(size_t offset) const noexcept
         {
             return iterator {(ctrl_ + offset),
                              const_cast<Slot<T, HashStoragePolicy>*>(slots_ + offset)};
@@ -963,7 +986,7 @@ namespace alp
                     SimdBackend Backend = DefaultBackend,
                     typename Allocator = std::allocator<std::byte>,
                     typename LoadFactorRatio = DefaultLoadFactor,
-                    typename HashStoragePolicy = DefaultHashStoragePolicy,
+                    typename HashStoragePolicy = typename HashStorageSelector<T>::type,
                     typename Prober = DefaultProber>
         requires std::move_constructible<T>
     class Set
@@ -1096,7 +1119,9 @@ namespace alp
         {
             auto it = find(key);
             if (it != end())
+            {
                 return std::ref(*it);
+            }
             return std::unexpected(Error::NotFound);
         }
 

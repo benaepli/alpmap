@@ -37,30 +37,30 @@ namespace alp
             struct Iterator
             {
                 BitMask bits;
-                int operator*() const { return std::countr_zero(bits); }
-                Iterator& operator++()
+                int operator*() const noexcept { return std::countr_zero(bits); }
+                Iterator& operator++() noexcept
                 {
                     bits &= (bits - 1);
                     return *this;
                 }
-                bool operator!=(Iterator const& other) const { return bits != other.bits; }
+                bool operator!=(Iterator const& other) const noexcept { return bits != other.bits; }
             };
 
-            Iterator begin() const { return {bits}; }
-            Iterator end() const { return {0}; }
+            Iterator begin() const noexcept { return {bits}; }
+            Iterator end() const noexcept { return {0}; }
         };
 
         /// Load control bytes from memory into a SIMD register.
-        static Register load(std::uint8_t const* ptr) { return Register {ptr}; }
+        static Register load(std::uint8_t const* ptr) noexcept { return Register {ptr}; }
 
         /// Match all lanes equal to the given value.
-        static Mask match(Register reg, std::uint8_t val) { return reg == ctrl_simd(val); }
+        static Mask match(Register reg, std::uint8_t val) noexcept { return reg == ctrl_simd(val); }
 
         /// Match all lanes marked as empty (0x80).
-        static Mask matchEmpty(Register reg) { return reg == static_cast<std::uint8_t>(0x80); }
+        static Mask matchEmpty(Register reg) noexcept { return reg == static_cast<std::uint8_t>(0x80); }
 
         /// Match all lanes that contain a value (not empty, deleted, or sentinel).
-        static Mask matchFull(Register reg)
+        static Mask matchFull(Register reg) noexcept
         {
             return (reg != static_cast<std::uint8_t>(0x80))  // not Empty
                 && (reg != static_cast<std::uint8_t>(0xFE))  // not Deleted
@@ -68,15 +68,15 @@ namespace alp
         }
 
         /// Check if any lane in the mask is true.
-        static bool any(Mask mask) { return eve::any(mask); }
+        static bool any(Mask mask) noexcept { return eve::any(mask); }
 
         /// Find the index of the first true lane.
-        static std::optional<int> firstTrue(Mask mask) { return eve::first_true(mask); }
+        static std::optional<int> firstTrue(Mask mask) noexcept { return eve::first_true(mask); }
 
         /// Convert a SIMD mask to a scalar bitmask for iteration.
-        static Iterable iterate(Mask mask) { return Iterable {eve::top_bits {mask}.as_int()}; }
+        static Iterable iterate(Mask mask) noexcept { return Iterable {eve::top_bits {mask}.as_int()}; }
 
-        static std::optional<int> nextTrue(Mask mask, size_t nextIndex)
+        static std::optional<int> nextTrue(Mask mask, size_t nextIndex) noexcept
         {
             BitMask bits = eve::top_bits {mask}.as_int();
             bits &= (~0ULL << nextIndex);
