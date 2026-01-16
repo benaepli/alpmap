@@ -124,9 +124,8 @@ see [docs/building.md](docs/building.md).
 ### Choosing SIMD Backend
 
 ```cpp
-#include <alp/backends/sse.h>
+import alp;
 
-// Explicitly use SSE backend
 alp::Set<int, alp::RapidHasher, std::equal_to<>,
          alp::IdentityHashPolicy, alp::SseBackend> sseSet;
 ```
@@ -137,18 +136,18 @@ alp::Set<int, alp::RapidHasher, std::equal_to<>,
 // Force hash storage for POD types (trades memory for speed)
 alp::Set<int, alp::RapidHasher, std::equal_to<>,
          alp::IdentityHashPolicy, alp::DefaultBackend,
-         std::allocator<std::byte>, alp::DefaultLoadFactor,
+         std::allocator<std::byte>, std::ratio<7, 8>,
          alp::StoreHashTag> cachedSet;
 ```
 
 ### Probing Scheme Selection
 
 ```cpp
-// Use quadratic probing instead of linear
+// Use linear probing instead of quadratic (default)
 alp::Set<int, alp::RapidHasher, std::equal_to<>,
          alp::IdentityHashPolicy, alp::DefaultBackend,
-         std::allocator<std::byte>, alp::DefaultLoadFactor,
-         alp::NoStoreHashTag, alp::QuadraticProbing> quadSet;
+         std::allocator<std::byte>, std::ratio<7, 8>,
+         alp::NoStoreHashTag, alp::LinearProbing> linearSet;
 ```
 
 ## Documentation
